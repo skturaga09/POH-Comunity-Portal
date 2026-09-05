@@ -1,0 +1,13 @@
+{
+  "name": "poh-community-portal-functions",
+  "private": true,
+  "main": "index.js",
+  "engines": {
+    "node": "22"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.7.0",
+    "firebase-functions": "^6.2.0",
+    "pdf-lib": "^1.17.1"
+  }
+}

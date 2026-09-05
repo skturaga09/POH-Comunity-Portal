@@ -1,0 +1,107 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function ownProfile(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function hasAccessRecord() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function approved() {
+      return hasAccessRecord()
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == 'active';
+    }
+
+    function administrator() {
+      return approved()
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['super_admin', 'admin', 'president'];
+    }
+
+    // A signed-in person can see only their own access record. Roles and
+    // approval are server-managed by Cloud Functions, never browser-managed.
+    match /users/{userId} {
+      allow get: if ownProfile(userId);
+      allow list, create, update, delete: if false;
+    }
+
+    // Resident records can contain phone, tenancy and parking data. They are
+    // returned through the callable directory endpoint, which removes private
+    // fields for ordinary residents. No browser gets direct collection access.
+    match /residents/{residentId} {
+      allow read, write: if false;
+    }
+
+    match /events/{eventId} {
+      allow get, list: if approved();
+      allow create, update, delete: if administrator();
+    }
+
+    match /events/{eventId}/contributions/{contributionId} {
+      allow get, list: if approved();
+      // Finance records are written through the callable workflow so duplicate
+      // checks and immutable audit entries cannot be bypassed from a browser.
+      allow create, update, delete: if false;
+    }
+
+    match /events/{eventId}/expenses/{expenseId} {
+      allow get, list: if approved();
+      // The server records expenses after validating closure state and receipt
+      // metadata, then creates the matching audit entry.
+      allow create, update, delete: if false;
+    }
+
+    // Post-settlement "deficit recovery" top-ups, recorded through the callable
+    // workflow (SPOC/admin only, variable amount). Any approved resident can view
+    // them for transparency; browsers never write directly.
+    match /events/{eventId}/additionalContributions/{contributionId} {
+      allow get, list: if approved();
+      allow create, update, delete: if false;
+    }
+
+    match /notices/{noticeId} {
+      allow get, list: if approved();
+      allow create, update, delete: if administrator();
+    }
+
+    match /committee/{memberId} {
+      allow get, list: if approved();
+      allow create, update, delete: if administrator();
+    }
+
+    // Logs remain immutable from clients. Privileged server code writes them.
+    match /auditLogs/{logId} {
+      allow get, list: if administrator();
+      allow create, update, delete: if false;
+    }
+
+    match /parkingAuditLogs/{logId} {
+      allow get, list: if administrator();
+      allow create, update, delete: if false;
+    }
+
+    // Feedback board and experience ratings are served and mutated through the
+    // callable feedbackHub endpoint so anonymity, one-vote-per-user, and
+    // moderation are enforced server-side. No browser gets direct access.
+    match /feedbackItems/{itemId} {
+      allow read, write: if false;
+      match /{sub=**} {
+        allow read, write: if false;
+      }
+    }
+
+    match /experienceRatings/{uid} {
+      allow read, write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

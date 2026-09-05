@@ -1,0 +1,15 @@
+{
+  "name": "poh-measurement-harness",
+  "private": true,
+  "type": "module",
+  "description": "Emulator-only tools: seed data + baseline Firestore-read measurement. Not deployed.",
+  "scripts": {
+    "emulators": "bash ./emulator.sh",
+    "seed": "FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 GCLOUD_PROJECT=poh-community-portal node seed-emulator.mjs",
+    "measure": "node measure-baseline.mjs"
+  },
+  "dependencies": {
+    "firebase": "^11.10.0",
+    "firebase-admin": "^12.7.0"
+  }
+}

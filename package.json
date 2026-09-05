@@ -1,0 +1,15 @@
+{
+  "name": "poh-community-portal",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "deploy:staging": "firebase hosting:channel:deploy staging",
+    "deploy:prod": "firebase deploy --only hosting",
+    "deploy:functions": "firebase deploy --only functions"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

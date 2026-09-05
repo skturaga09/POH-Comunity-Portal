@@ -1,0 +1,14 @@
+node_modules/
+functions/node_modules/
+.firebase/
+*.log
+firebase-debug.log
+.DS_Store
+# generated build output (run `npm run build`)
+/public/
+
+# measurement harness (emulator-only, never deployed)
+tools/node_modules/
+tools/.npmcache/
+tools/jdk/
+tools/.data/

@@ -1,0 +1,71 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Any Firebase-authenticated user (must have signed in with Google).
+    // Portal access and authorization are enforced in Cloud Functions.
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // Profile uploads are restricted to the authenticated person's folder.
+    match /resident-photos/{userId}/{fileName} {
+      allow read: if signedIn();
+      allow write: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    // Directory owner profile photos: any authenticated portal user may upload for a flat.
+    match /owner-photos/{flat}/{fileName} {
+      allow read: if signedIn();
+      allow write: if signedIn()
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    // Event receipts: any authenticated portal user may upload.
+    // Access control for recording the expense is enforced in the Cloud Function.
+    // Receipts remain private (read: signedIn only).
+    match /event-receipts/{eventId}/{fileName} {
+      allow read: if signedIn();
+      allow write: if signedIn()
+        && request.resource.size < 10 * 1024 * 1024
+        && (request.resource.contentType.matches('image/.*|application/pdf|application/octet-stream') || request.resource.contentType == '');
+    }
+
+    match /committee-photos/{fileName} {
+      allow read: if signedIn();
+      allow write: if signedIn()
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    // Emergency contact & daily-helper photos (admin-managed; the saving of the
+    // contact record itself is gated in the Cloud Function).
+    match /contact-photos/{fileName} {
+      allow read: if signedIn();
+      allow write: if signedIn()
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    // Community gallery photos (admin-managed).
+    match /gallery-photos/{fileName} {
+      allow read: if signedIn();
+      allow write: if signedIn()
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    // Generated event summary PDFs (written server-side by the Cloud Function).
+    match /event-reports/{eventId}/{fileName} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
