@@ -1764,10 +1764,9 @@ function syncPaymentReferenceFields() {
   if (contributionContainer) {
     contributionContainer.id = "contributionReferenceContainer";
     const cash = contributionForm.elements.paymentMode?.value === "Cash";
-    // Use style.display (not just [hidden]) — a form-label CSS rule overrides the
-    // hidden attribute, which left the reference box visible for Cash.
-    contributionContainer.hidden = cash;
-    contributionContainer.style.display = cash ? "none" : "";
+    // `.form-grid label { display:flex !important }` overrides both [hidden] and a
+    // plain inline display, so hide with an inline !important that wins.
+    hideRefContainer(contributionContainer, cash);
     if (cash) contributionReference.value = "";
   }
   const expenseForm = byId("expenseForm");
@@ -1775,10 +1774,17 @@ function syncPaymentReferenceFields() {
   const expenseContainer = expenseReference?.closest("label");
   if (expenseContainer) {
     const cash = expenseForm.elements.paymentMode?.value === "Cash";
-    expenseContainer.hidden = cash;
-    expenseContainer.style.display = cash ? "none" : "";
+    hideRefContainer(expenseContainer, cash);
     if (cash) expenseReference.value = "";
   }
+}
+
+// Reliably show/hide a reference <label> despite the `!important` form-grid rule.
+function hideRefContainer(container, hide) {
+  if (!container) return;
+  container.hidden = hide;
+  if (hide) container.style.setProperty("display", "none", "important");
+  else container.style.removeProperty("display");
 }
 
 
@@ -2495,8 +2501,7 @@ function syncAdditionalReferenceFields() {
   const container = reference?.closest("label");
   if (container) {
     const cash = form.elements.paymentMode?.value === "Cash";
-    container.hidden = cash;
-    container.style.display = cash ? "none" : "";
+    hideRefContainer(container, cash);
     if (cash) reference.value = "";
   }
 }
