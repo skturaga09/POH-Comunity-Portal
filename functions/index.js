@@ -628,18 +628,23 @@ async function writeAudit(action, entity, detail, actor) {
 }
 
 async function eventFigures(eventId) {
-  const [event, contributions, expenses] = await Promise.all([
+  const [event, contributions, expenses, additional] = await Promise.all([
     db.collection("events").doc(eventId).get(),
     db.collection("events").doc(eventId).collection("contributions").get(),
-    db.collection("events").doc(eventId).collection("expenses").get()
+    db.collection("events").doc(eventId).collection("expenses").get(),
+    db.collection("events").doc(eventId).collection("additionalContributions").get()
   ]);
-  const collected = contributions.docs.reduce((total, entry) => total + Number(entry.data().amount || 0), 0);
+  const standardCollected = contributions.docs.reduce((total, entry) => total + Number(entry.data().amount || 0), 0);
+  // Deficit-recovery (ad-hoc) top-ups count toward the event's collected total, so
+  // any resulting surplus is carried to the common pool at settlement/close.
+  const additionalCollected = additional.docs.reduce((total, entry) => total + Number(entry.data().amount || 0), 0);
+  const collected = standardCollected + additionalCollected;
   const spent = expenses.docs
     .filter((entry) => String(entry.data().status || "Approved").toLowerCase() === "approved")
     .reduce((total, entry) => total + Number(entry.data().amount || 0), 0);
   const poolAllocated = Number(event.data()?.commonPoolAllocation || 0);
   const pendingExpenses = expenses.docs.filter((entry) => String(entry.data().status || "").toLowerCase() === "pending").length;
-  return { collected, poolAllocated, spent, balance: collected + poolAllocated - spent, pendingExpenses };
+  return { collected, standardCollected, additionalCollected, poolAllocated, spent, balance: collected + poolAllocated - spent, pendingExpenses };
 }
 
 exports.portalAccess = onCall({ region: "asia-south1" }, async (request) => {
