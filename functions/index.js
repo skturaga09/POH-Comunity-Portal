@@ -93,6 +93,16 @@ function isClosedEventData(d) {
   return /settled|closed|completed/.test(status) || String((d && d.settlementStatus) || "").toLowerCase() === "closed";
 }
 
+// Narrower than isClosedEventData: only events whose finances are frozen by settlement
+// (settled/closed status, or a treasurer-confirmed/closed settlementStatus). A plain
+// "Completed" event is NOT included, so a mistaken completion can still be undone by
+// re-activating it.
+function isSettledEventData(d) {
+  const status = String((d && d.status) || "").toLowerCase();
+  const settlement = String((d && d.settlementStatus) || "").toLowerCase();
+  return /settled|closed/.test(status) || settlement === "treasurer confirmed" || settlement === "closed";
+}
+
 function key(value) {
   return String(value || "")
     .trim()
@@ -1190,7 +1200,7 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     const eventRef = db.collection("events").doc(eventId);
     const event = await eventRef.get();
     if (!event.exists) throw new HttpsError("not-found", "Event not found.");
-    if (isClosedEventData(event.data())) throw new HttpsError("failed-precondition", "A completed or settled event cannot be re-activated.");
+    if (isSettledEventData(event.data())) throw new HttpsError("failed-precondition", "A settled or closed event cannot be re-activated.");
     const residentFloors = new Set((await db.collection("residents").get()).docs.map((entry) => String(entry.data().floor || "Unassigned")));
     const spocFloors = new Set((Array.isArray(event.data().spocs) ? event.data().spocs : []).filter((entry) => entry?.floor && entry?.flat).map((entry) => String(entry.floor)));
     if (!residentFloors.size || [...residentFloors].some((floor) => !spocFloors.has(floor))) throw new HttpsError("failed-precondition", "Assign one SPOC for every floor before activating this event.");
