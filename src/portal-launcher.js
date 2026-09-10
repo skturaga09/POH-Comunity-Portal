@@ -1764,7 +1764,10 @@ function syncPaymentReferenceFields() {
   if (contributionContainer) {
     contributionContainer.id = "contributionReferenceContainer";
     const cash = contributionForm.elements.paymentMode?.value === "Cash";
+    // Use style.display (not just [hidden]) — a form-label CSS rule overrides the
+    // hidden attribute, which left the reference box visible for Cash.
     contributionContainer.hidden = cash;
+    contributionContainer.style.display = cash ? "none" : "";
     if (cash) contributionReference.value = "";
   }
   const expenseForm = byId("expenseForm");
@@ -1773,6 +1776,7 @@ function syncPaymentReferenceFields() {
   if (expenseContainer) {
     const cash = expenseForm.elements.paymentMode?.value === "Cash";
     expenseContainer.hidden = cash;
+    expenseContainer.style.display = cash ? "none" : "";
     if (cash) expenseReference.value = "";
   }
 }
@@ -2492,6 +2496,7 @@ function syncAdditionalReferenceFields() {
   if (container) {
     const cash = form.elements.paymentMode?.value === "Cash";
     container.hidden = cash;
+    container.style.display = cash ? "none" : "";
     if (cash) reference.value = "";
   }
 }
