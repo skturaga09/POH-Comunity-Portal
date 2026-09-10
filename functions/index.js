@@ -628,23 +628,29 @@ async function writeAudit(action, entity, detail, actor) {
 }
 
 async function eventFigures(eventId) {
-  const [event, contributions, expenses, additional] = await Promise.all([
-    db.collection("events").doc(eventId).get(),
-    db.collection("events").doc(eventId).collection("contributions").get(),
-    db.collection("events").doc(eventId).collection("expenses").get(),
-    db.collection("events").doc(eventId).collection("additionalContributions").get()
+  const eventRef = db.collection("events").doc(eventId);
+  const [event, contributions, expenses] = await Promise.all([
+    eventRef.get(),
+    eventRef.collection("contributions").get(),
+    eventRef.collection("expenses").get()
   ]);
   const standardCollected = contributions.docs.reduce((total, entry) => total + Number(entry.data().amount || 0), 0);
-  // Deficit-recovery (ad-hoc) top-ups count toward the event's collected total, so
-  // any resulting surplus is carried to the common pool at settlement/close.
-  const additionalCollected = additional.docs.reduce((total, entry) => total + Number(entry.data().amount || 0), 0);
-  const collected = standardCollected + additionalCollected;
   const spent = expenses.docs
     .filter((entry) => String(entry.data().status || "Approved").toLowerCase() === "approved")
     .reduce((total, entry) => total + Number(entry.data().amount || 0), 0);
   const poolAllocated = Number(event.data()?.commonPoolAllocation || 0);
   const pendingExpenses = expenses.docs.filter((entry) => String(entry.data().status || "").toLowerCase() === "pending").length;
-  return { collected, standardCollected, additionalCollected, poolAllocated, spent, balance: collected + poolAllocated - spent, pendingExpenses };
+  // Deficit-recovery (ad-hoc) top-ups only exist once an event ran a deficit, so read
+  // that sub-collection only when the base balance is negative (mirrors the client and
+  // avoids an always-empty read per event). They count toward collected, so any
+  // resulting surplus is carried to the common pool at settlement/close.
+  let additionalCollected = 0;
+  if (standardCollected + poolAllocated - spent < 0) {
+    const additional = await eventRef.collection("additionalContributions").get();
+    additionalCollected = additional.docs.reduce((total, entry) => total + Number(entry.data().amount || 0), 0);
+  }
+  const collected = standardCollected + additionalCollected;
+  return { collected, poolAllocated, spent, balance: collected + poolAllocated - spent, pendingExpenses };
 }
 
 exports.portalAccess = onCall({ region: "asia-south1" }, async (request) => {
@@ -1075,7 +1081,7 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     const receiptUrl = receiptUrls[0] || "";
     const event = await db.collection("events").doc(eventId).get();
     if (!event.exists) throw new HttpsError("not-found", "Event not found.");
-    if (/closed|settled/i.test(String(event.data().status || "")) || /^closed$/i.test(String(event.data().settlementStatus || ""))) throw new HttpsError("failed-precondition", "This event is settled and closed for new expenses.");
+    if (isClosedEventData(event.data())) throw new HttpsError("failed-precondition", "This event is settled and closed for new expenses.");
 
     // Only the floor SPOC or an administrator may submit expenses.
     const expenseIsAdmin = ADMIN_ROLES.includes(caller.profile.role);
@@ -1098,7 +1104,7 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     // edited, approved, or rejected (mirrors the recordExpense closure guard).
     const eventDoc = await db.collection("events").doc(String(eventId)).get();
     if (!eventDoc.exists) throw new HttpsError("not-found", "Event not found.");
-    if (/closed|settled/i.test(String(eventDoc.data().status || "")) || /^closed$/i.test(String(eventDoc.data().settlementStatus || ""))) throw new HttpsError("failed-precondition", "This event is settled and closed; its expenses can no longer be edited.");
+    if (isClosedEventData(eventDoc.data())) throw new HttpsError("failed-precondition", "This event is settled and closed; its expenses can no longer be edited.");
     const expenseRef = db.collection("events").doc(String(eventId)).collection("expenses").doc(String(expenseId));
     const expenseSnap = await expenseRef.get();
     if (!expenseSnap.exists) throw new HttpsError("not-found", "Expense not found.");
@@ -1184,7 +1190,7 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     const eventRef = db.collection("events").doc(eventId);
     const event = await eventRef.get();
     if (!event.exists) throw new HttpsError("not-found", "Event not found.");
-    if (/^closed$/i.test(String(event.data().status || "")) || /^closed$/i.test(String(event.data().settlementStatus || ""))) throw new HttpsError("failed-precondition", "A settled event cannot be activated.");
+    if (isClosedEventData(event.data())) throw new HttpsError("failed-precondition", "A completed or settled event cannot be re-activated.");
     const residentFloors = new Set((await db.collection("residents").get()).docs.map((entry) => String(entry.data().floor || "Unassigned")));
     const spocFloors = new Set((Array.isArray(event.data().spocs) ? event.data().spocs : []).filter((entry) => entry?.floor && entry?.flat).map((entry) => String(entry.floor)));
     if (!residentFloors.size || [...residentFloors].some((floor) => !spocFloors.has(floor))) throw new HttpsError("failed-precondition", "Assign one SPOC for every floor before activating this event.");
@@ -1292,9 +1298,11 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     const eventId = String(payload.eventId || ""); const eventRef = db.collection("events").doc(eventId); const event = await eventRef.get();
     if (!event.exists) throw new HttpsError("not-found", "Event not found.");
     if (event.data().settlementStatus !== "Treasurer confirmed" && caller.profile.role !== "super_admin") throw new HttpsError("failed-precondition", "Treasurer confirmation is required before closure.");
-    const figures = await eventFigures(eventId); const fundRef = db.collection("system").doc("communityFund"); const fund = await fundRef.get();
-    const currentPool = Number(fund.data()?.balance || 0); const nextPool = currentPool + figures.balance;
-    await db.runTransaction(async (transaction) => { transaction.set(eventRef, { status: "Closed", active: false, settlementStatus: "Closed", closedBy: caller.email, closedAt: admin.firestore.FieldValue.serverTimestamp(), settlementFigures: figures, commonPoolCarryForward: figures.balance }, { merge: true }); transaction.set(fundRef, { balance: nextPool, updatedAt: admin.firestore.FieldValue.serverTimestamp(), lastEventId: eventId }, { merge: true }); });
+    const figures = await eventFigures(eventId); const fundRef = db.collection("system").doc("communityFund");
+    // Read the fund balance INSIDE the transaction (mirrors allocateCommonPool) so a
+    // concurrent allocation/closure can't be clobbered by a stale read-modify-write.
+    let nextPool = 0;
+    await db.runTransaction(async (transaction) => { const fund = await transaction.get(fundRef); nextPool = Number(fund.data()?.balance || 0) + figures.balance; transaction.set(eventRef, { status: "Closed", active: false, settlementStatus: "Closed", closedBy: caller.email, closedAt: admin.firestore.FieldValue.serverTimestamp(), settlementFigures: figures, commonPoolCarryForward: figures.balance }, { merge: true }); transaction.set(fundRef, { balance: nextPool, updatedAt: admin.firestore.FieldValue.serverTimestamp(), lastEventId: eventId }, { merge: true }); });
     await writeAudit("Closed event settlement", "Event", `${eventId} · carry forward ${figures.balance}`, caller);
     return { ...figures, commonPoolBalance: nextPool };
   }

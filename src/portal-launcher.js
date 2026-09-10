@@ -632,7 +632,9 @@ function renderEvents() {
   byId("eventGrid").innerHTML = portalData.events.length ? portalData.events.map((event) => {
     const finance = portalData.finance[event.id] || { collected: 0, spent: 0 };
     const poolAllocated = Number(event.commonPoolAllocation || 0);
-    const balance = finance.collected + poolAllocated - finance.spent;
+    // Include deficit-recovery top-ups so the card's Available matches the backend
+    // settlement balance (eventFigures folds additionalCollected into the balance).
+    const balance = finance.collected + Number(finance.additionalCollected || 0) + poolAllocated - finance.spent;
     const isActive = eventStatus(event) === "Active";
     const isDone = isClosed(event);
     // Every event's dashboard is viewable at any time (read-only finance view).
@@ -1323,7 +1325,10 @@ function renderEventDashboard() {
   const flatCount = portalData.residents.length || 147;
   const pendingCount = Math.max(flatCount - contributorsCount, 0);
   const poolAllocated = Number(event.commonPoolAllocation || 0);
-  const balance = collected + poolAllocated - spent;
+  // baseBalance excludes deficit-recovery top-ups (drives the deficit/recovery panel);
+  // the displayed balance folds them in to match the backend settlement figures.
+  const baseBalance = collected + poolAllocated - spent;
+  const balance = baseBalance + Number(rawFinance.additionalCollected || 0);
 
   byId("dashboardEventLabel").textContent = `${eventStatus(event)} event · ${eventDetail(event)}`;
   byId("dashboardEventName").textContent = eventTitle(event);
@@ -1363,7 +1368,7 @@ function renderEventDashboard() {
   // settled figures; the section + button appear only while a deficit exists.
   const additionalContributions = rawFinance.additionalContributions || [];
   const additionalCollected = Number(rawFinance.additionalCollected || 0);
-  const deficit = Math.max(-balance, 0);
+  const deficit = Math.max(-baseBalance, 0);
   const hasDeficit = deficit > 0;
   const covered = Math.min(additionalCollected, deficit);
   const remaining = Math.max(deficit - additionalCollected, 0);
@@ -1390,9 +1395,12 @@ function renderEventDashboard() {
         : "<tr><td class=\"empty-inline\" colspan=\"5\">No additional contributions recorded yet.</td></tr>";
     }
   }
-  // Record button: SPOC/admin only, and only while a deficit exists.
+  // Record button: SPOC/admin only, and only while the deficit is not yet fully
+  // covered. Gate on `remaining` (not `hasDeficit`) so the button hides exactly when
+  // the backend guard starts rejecting (balance incl. top-ups >= 0), never offering
+  // an action that would fail.
   if (byId("addAdditionalContributionAction")) {
-    byId("addAdditionalContributionAction").hidden = !(canRecordFinance && hasDeficit);
+    byId("addAdditionalContributionAction").hidden = !(canRecordFinance && remaining > 0);
   }
   // View button: anyone (residents included) can view the top-ups when a deficit exists.
   if (byId("viewAdditionalContributionAction")) {
@@ -2096,7 +2104,8 @@ window.openEventSummaryReport = function openEventSummaryReport() {
   const collected = rawFinance.collected || (isIndy ? 30500 : 0);
   const spent = rawFinance.spent || (isIndy ? 567 : 0);
   const poolAllocated = Number(event.commonPoolAllocation || 0);
-  const balance = collected + poolAllocated - spent;
+  // Include deficit-recovery top-ups so the report balance matches the backend/settlement figure.
+  const balance = collected + Number(rawFinance.additionalCollected || 0) + poolAllocated - spent;
   const totalFlats = portalData.residents.length || 147;
   const contributors = rawFinance.contributions || [];
   const contributorCount = contributors.length || (isIndy ? 61 : 0);
@@ -2257,7 +2266,8 @@ byId("copyWhatsAppSummaryBtn").addEventListener("click", () => {
   const collected = rawFinance.collected || (isIndy ? 30500 : 0);
   const spent = rawFinance.spent || (isIndy ? 567 : 0);
   const poolAllocated = Number(event.commonPoolAllocation || 0);
-  const balance = collected + poolAllocated - spent;
+  // Include deficit-recovery top-ups so the summary balance matches the backend/settlement figure.
+  const balance = collected + Number(rawFinance.additionalCollected || 0) + poolAllocated - spent;
   const totalFlats = portalData.residents.length || 147;
   const contributorCount = (rawFinance.contributions || []).length || (isIndy ? 61 : 0);
   const participationRate = Math.round((contributorCount / totalFlats) * 100);
