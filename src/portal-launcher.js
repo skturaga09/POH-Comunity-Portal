@@ -424,14 +424,46 @@ function flatNumberOrder(flatA, flatB, floorA, floorB) {
 function prepareContributionForm() {
   const form = byId("contributionForm");
   form.reset();
-  lockContributionAmount();
+  delete form.dataset.editingContributionId; // fresh "add" mode
+  if (byId("contributionFormTitle")) byId("contributionFormTitle").textContent = "Add Contribution";
+  const saveBtn = byId("saveContribution");
+  if (saveBtn) saveBtn.innerHTML = '<i class="fa-solid fa-circle-check" aria-hidden="true"></i> Save contribution';
+  setupContributionAmount();
   syncPaymentReferenceFields();
   const floors = [...new Set(portalData.residents.map((resident) => String(resident.floor || "Unassigned")))].sort(contributionFloorOrder);
+  byId("contributionFloor").disabled = false;
   byId("contributionFloor").innerHTML = `<option value="">Select floor</option>${floors.map((floor) => `<option value="${escapeHtml(floor)}">${escapeHtml(floor === "G" ? "Ground floor" : `Floor ${floor}`)}</option>`).join("")}`;
   byId("contributionFlat").innerHTML = "<option value=\"\">Select floor first</option>";
   byId("contributionFlat").disabled = true;
   byId("contributionOwner").value = "";
   byId("contributionSpoc").value = "";
+  const hint = byId("contributionDuplicateWarning");
+  if (hint) hint.hidden = true;
+}
+
+// Open the contribution form pre-filled to EDIT an existing contribution.
+function openContributionEditor(contribution) {
+  const form = byId("contributionForm");
+  prepareContributionForm();
+  form.dataset.editingContributionId = String(contribution.id || "");
+  if (byId("contributionFormTitle")) byId("contributionFormTitle").textContent = `Edit Contribution · Flat ${contribution.flat || ""}`;
+  const saveBtn = byId("saveContribution");
+  if (saveBtn) saveBtn.innerHTML = '<i class="fa-solid fa-circle-check" aria-hidden="true"></i> Update contribution';
+  // Show flat/floor for context, but locked (edit keeps the same flat).
+  byId("contributionFloor").value = String(contribution.floor || "");
+  populateContributionFlats();
+  byId("contributionFlat").value = String(contribution.flat || contribution.flatNo || "");
+  byId("contributionFloor").disabled = true;
+  byId("contributionFlat").disabled = true;
+  byId("contributionOwner").value = contribution.name || contribution.ownerName || getFlatResidentName(String(contribution.flat || ""), contribution.name);
+  form.elements.amount.value = Number(contribution.amount || 0) || "";
+  form.elements.paymentMode.value = ["UPI", "Cash", "Bank Transfer"].includes(contribution.paymentMode) ? contribution.paymentMode : "UPI";
+  if (form.elements.reference) form.elements.reference.value = contribution.reference || "";
+  syncPaymentReferenceFields();
+  populateContributionSpoc();
+  const hint = byId("contributionDuplicateWarning");
+  if (hint) hint.hidden = true;
+  byId("contributionFormModal").showModal();
 }
 
 // Official Floor SPOC mapping: G->Samarth, 1->Harsha, 2->Gangadhar, 3->Siddu, 4->Naveen, 5->Yeshwanth, 6->Santhosh
@@ -501,43 +533,37 @@ function populateContributionOwner() {
   checkContributionDuplicate();
 }
 
+// Non-blocking hint: multiple contributions per flat are now allowed, so this
+// only INFORMS the SPOC how much the flat has already contributed. It never
+// disables the save button. (Kept the old name; callers are unchanged.)
 function checkContributionDuplicate() {
   const flat = byId("contributionFlat")?.value?.trim() || "";
   const event = activeEvent();
   const saveBtn = byId("saveContribution");
   const warningEl = byId("contributionDuplicateWarning");
+  if (saveBtn) { saveBtn.disabled = false; saveBtn.style.opacity = "1"; } // never block
 
-  if (!event || !flat) {
+  if (!event || !flat || byId("contributionForm")?.dataset.editingContributionId) {
     if (warningEl) warningEl.hidden = true;
-    if (saveBtn) { saveBtn.disabled = false; saveBtn.style.opacity = "1"; }
     return false;
   }
 
   const finance = portalData.finance[event.id] || { contributions: [] };
-  const existing = (finance.contributions || []).find((item) =>
+  const existing = (finance.contributions || []).filter((item) =>
     String(item.flat || item.flatNo || "").trim().toUpperCase() === flat.toUpperCase()
   );
 
-  if (existing) {
-    if (warningEl) {
-      const rawDate = existing.date || existing.createdAt;
-      const formattedDate = rawDate ? new Date(rawDate).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "";
-      warningEl.innerHTML = `<i class="fa-solid fa-circle-exclamation" style="font-size:15px;color:#9c3f34;margin-right:6px;"></i> <strong>Contribution Already Recorded:</strong> Flat <strong>${escapeHtml(flat)}</strong> has already recorded a contribution of ₹${existing.amount || 500} (${escapeHtml(existing.paymentMode || "Received")})${formattedDate ? ` on ${formattedDate}` : ""}. Duplicate contributions are not permitted.`;
-      warningEl.hidden = false;
-    }
-    if (saveBtn) {
-      saveBtn.disabled = true;
-      saveBtn.style.opacity = "0.45";
-    }
-    return true;
-  } else {
-    if (warningEl) warningEl.hidden = true;
-    if (saveBtn) {
-      saveBtn.disabled = false;
-      saveBtn.style.opacity = "1";
-    }
-    return false;
+  if (existing.length && warningEl) {
+    const total = existing.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+    warningEl.innerHTML = `<i class="fa-solid fa-circle-info" style="font-size:15px;color:#1e5c4e;margin-right:6px;"></i> Flat <strong>${escapeHtml(flat)}</strong> already has <strong>${existing.length}</strong> contribution${existing.length > 1 ? "s" : ""} totalling <strong>₹${total.toLocaleString("en-IN")}</strong>. You can record another.`;
+    warningEl.hidden = false;
+    warningEl.style.background = "#f0f7f4";
+    warningEl.style.border = "1px solid #bce2d2";
+    warningEl.style.color = "#1e5c4e";
+  } else if (warningEl) {
+    warningEl.hidden = true;
   }
+  return false;
 }
 
 function activeNotices() {
@@ -614,7 +640,7 @@ function renderEvents() {
       : isDone
       ? `<button class="solid-button" type="button" data-open-event="${escapeHtml(event.id)}" style="background:#183e35;border-color:#183e35;"><i class="fa-solid fa-eye" style="margin-right:6px;" aria-hidden="true"></i> View Dashboard (Completed)</button>`
       : `<button class="solid-button" type="button" disabled style="opacity:0.6;cursor:not-allowed;background:#687870;box-shadow:none;" title="Event dashboard is open only when event status is Active or Completed">Dashboard Locked (${escapeHtml(eventStatus(event))}) <i class="fa-solid fa-lock" style="margin-left:6px;" aria-hidden="true"></i></button>`;
-    return `<article class="event-card"><div class="event-card-top"><span class="state-pill">${escapeHtml(eventStatus(event))}</span><i class="fa-solid fa-calendar-days" aria-hidden="true"></i></div><h3>${escapeHtml(eventTitle(event))}</h3><p>${escapeHtml(textOr(event.description, "A shared community celebration."))}</p><small class="event-date"><i class="fa-regular fa-calendar" aria-hidden="true"></i> ${escapeHtml(eventDetail(event))} · Contribution: ₹${event.contributionAmount || 500}/flat</small><div class="event-finance"><span>Contributions <strong>${money(finance.collected)}</strong></span><span>Pool in use <strong>${money(poolAllocated)}</strong></span><span>Spent <strong>${money(finance.spent)}</strong></span><span class="${balance < 0 ? "negative" : ""}">Available <strong>${money(balance)}</strong></span></div>${actionBtn}</article>`;
+    return `<article class="event-card"><div class="event-card-top"><span class="state-pill">${escapeHtml(eventStatus(event))}</span><i class="fa-solid fa-calendar-days" aria-hidden="true"></i></div><h3>${escapeHtml(eventTitle(event))}</h3><p>${escapeHtml(textOr(event.description, "A shared community celebration."))}</p><small class="event-date"><i class="fa-regular fa-calendar" aria-hidden="true"></i> ${escapeHtml(eventDetail(event))} · Suggested: ₹${event.contributionAmount || 500}/flat</small><div class="event-finance"><span>Contributions <strong>${money(finance.collected)}</strong></span><span>Pool in use <strong>${money(poolAllocated)}</strong></span><span>Spent <strong>${money(finance.spent)}</strong></span><span class="${balance < 0 ? "negative" : ""}">Available <strong>${money(balance)}</strong></span></div>${actionBtn}</article>`;
   }).join("") : empty("No events have been migrated. Use the Admin console to create your first community event.");
 }
 
@@ -982,7 +1008,7 @@ function renderAdmin() {
     const canActivate = adminRoles.has(approvedProfile?.role) && !closed && !active;
     const canComplete = adminRoles.has(approvedProfile?.role) && !closed;
     const canEdit = adminRoles.has(approvedProfile?.role);
-    const amountStr = ` · ₹${event.contributionAmount || 500}/flat`;
+    const amountStr = ` · Suggested ₹${event.contributionAmount || 500}/flat`;
     let statusBadge = "";
     if (active) {
       statusBadge = '<span class="event-current-state"><i class="fa-solid fa-circle-check" aria-hidden="true"></i> Current Active</span>';
@@ -1180,20 +1206,18 @@ function renderSpocFloorMatrix(event) {
     .sort((a, b) => flatNumberOrder(a.flat, b.flat, a.floor, b.floor));
 
   const eventContributions = (portalData.finance[event.id]?.contributions || []);
-  const paidMap = new Map();
+  // Aggregate per flat — a flat may now have multiple contributions. Each
+  // contribution is counted ONCE under its canonical (normalized) flat key.
+  const paidByFlat = new Map();
   eventContributions.forEach((c) => {
-    const flatKey = String(c.flat || c.flatNo || "").trim().toUpperCase();
-    if (flatKey) {
-      paidMap.set(flatKey, c);
-      paidMap.set(flatKey.replace(/^0+/, ""), c);
-    }
-    const docId = String(c.id || "").trim();
-    const docMatch = docId.match(/-(G?\d{2,3}[A-Z]?)$/i);
-    if (docMatch) {
-      const extracted = docMatch[1].toUpperCase();
-      paidMap.set(extracted, c);
-      paidMap.set(extracted.replace(/^0+/, ""), c);
-    }
+    let key = String(c.flat || c.flatNo || "").trim().toUpperCase().replace(/^0+/, "");
+    if (!key) { const m = String(c.id || "").match(/-(G?\d{2,3}[A-Z]?)$/i); if (m) key = m[1].toUpperCase().replace(/^0+/, ""); }
+    if (!key) return;
+    const cur = paidByFlat.get(key) || { total: 0, count: 0, modes: new Set() };
+    cur.total += Number(c.amount || 0);
+    cur.count += 1;
+    cur.modes.add(c.paymentMode || "Received");
+    paidByFlat.set(key, cur);
   });
 
   const expectedAmount = Number(event.contributionAmount || 500);
@@ -1208,8 +1232,8 @@ function renderSpocFloorMatrix(event) {
       const flatStr = String(r.flat || r.flatNo || r.id || "").trim();
       const flatUpper = flatStr.toUpperCase();
       const flatNorm = flatUpper.replace(/^0+/, "");
-      const contribution = paidMap.get(flatNorm) || paidMap.get(flatUpper) || paidMap.get(flatStr);
-      const isPaid = Boolean(contribution);
+      const agg = paidByFlat.get(flatNorm) || paidByFlat.get(flatUpper);
+      const isPaid = Boolean(agg && agg.count);
       const resName = residentName(r);
 
       const phoneDigits = String(r.ownerPrimaryPhone || r.primaryPhone || r.phone || r.mobile || r.ownerSecondaryPhone || r.tenantPrimaryPhone || "").replace(/\D/g, "");
@@ -1237,13 +1261,15 @@ Thank you for your active participation & support!
 
       if (isPaid) {
         paidCount++;
-        paidTotal += Number(contribution.amount || expectedAmount);
+        paidTotal += Number(agg.total || 0);
+        const multi = agg.count > 1 ? ` <small style="color:#5a7d71;font-weight:700;">×${agg.count}</small>` : "";
+        const modeLabel = agg.modes.size > 1 ? "Multiple" : ([...agg.modes][0] || "Received");
         return `<tr style="background:#fff;">
           <td style="${cell}font-weight:800;color:#17372c;font-family:'Space Grotesk',sans-serif;">${escapeHtml(flatStr)}</td>
           <td style="${cell}color:#2b3b34;">${escapeHtml(resName)}</td>
           <td style="${cell}"><span style="display:inline-flex;align-items:center;gap:5px;background:#e7f4ec;color:#23584b;font-size:11px;font-weight:800;padding:3px 10px;border-radius:12px;white-space:nowrap;"><i class="fa-solid fa-circle-check"></i> Paid</span></td>
-          <td style="${cell}text-align:right;font-weight:800;color:#183e35;white-space:nowrap;">₹${Number(contribution.amount || expectedAmount).toLocaleString("en-IN")}</td>
-          <td style="${cell}color:#5a7d71;font-size:12px;">${escapeHtml(contribution.paymentMode || "Received")}</td>
+          <td style="${cell}text-align:right;font-weight:800;color:#183e35;white-space:nowrap;">₹${Number(agg.total || 0).toLocaleString("en-IN")}${multi}</td>
+          <td style="${cell}color:#5a7d71;font-size:12px;">${escapeHtml(modeLabel)}</td>
         </tr>`;
       } else {
         pendingCount++;
@@ -1372,15 +1398,30 @@ function renderEventDashboard() {
     byId("viewAdditionalContributionAction").hidden = !hasDeficit;
   }
 
+  // Who can edit/delete a contribution on a given floor: admins + committee
+  // (any floor), or the floor SPOC (own floor). Never on a closed event.
+  const contribEditable = !isClosed(event);
+  const canManageContribution = (floor) => contribEditable && (
+    directoryEditorRoles.has(approvedProfile?.role) ||
+    (financeAccess.isSpoc && String(financeAccess.userSpocFloor || "") === String(floor || ""))
+  );
+  const anyContribManager = contribEditable && (directoryEditorRoles.has(approvedProfile?.role) || financeAccess.isSpoc);
   byId("contributionList").innerHTML = rawFinance.contributions.length ? rawFinance.contributions
     .slice()
     .sort((a, b) => flatNumberOrder(a.flat, b.flat, a.floor, b.floor))
     .map((item) => {
       const flatStr = String(item.flat || "").trim();
       const displayName = getFlatResidentName(flatStr, item.name || item.ownerName || item.residentName);
-      return `<tr><td>${escapeHtml(textOr(item.flat, "—"))}</td><td>${escapeHtml(displayName)}</td><td><strong>${money(item.amount)}</strong></td><td>${escapeHtml(textOr(item.paymentMode, "—"))}</td></tr>`;
+      const canManage = canManageContribution(item.floor);
+      const actions = canManage
+        ? `<div style="display:flex;gap:6px;justify-content:flex-end;">
+             <button type="button" class="contrib-edit-btn" data-edit-contribution='${escapeHtml(JSON.stringify({ id: item.id, flat: item.flat, floor: item.floor, name: displayName, amount: item.amount, paymentMode: item.paymentMode, reference: item.reference || "" }))}' style="background:#e6efe9;color:#183e35;border:1px solid #c2d6c7;font-size:11px;font-weight:700;padding:4px 9px;border-radius:5px;cursor:pointer;white-space:nowrap;"><i class="fa-solid fa-pen-to-square"></i> Edit</button>
+             <button type="button" class="contrib-delete-btn" data-delete-contribution="${escapeHtml(item.id || "")}" data-flat="${escapeHtml(flatStr)}" data-amount="${Number(item.amount || 0)}" style="background:#fdf0ed;color:#9c3f34;border:1px solid #f2c7c1;font-size:11px;font-weight:700;padding:4px 9px;border-radius:5px;cursor:pointer;white-space:nowrap;"><i class="fa-solid fa-trash"></i></button>
+           </div>`
+        : "";
+      return `<tr><td>${escapeHtml(textOr(item.flat, "—"))}</td><td>${escapeHtml(displayName)}</td><td><strong>${money(item.amount)}</strong></td><td>${escapeHtml(textOr(item.paymentMode, "—"))}</td><td style="text-align:right;">${actions}</td></tr>`;
     })
-    .join("") : "<tr><td class=\"empty-inline\" colspan=\"4\">No contributions recorded for this event yet.</td></tr>";
+    .join("") : "<tr><td class=\"empty-inline\" colspan=\"5\">No contributions recorded for this event yet.</td></tr>";
   renderExpenseHistory();
   byId("contributionEventName").textContent = eventTitle(event);
   byId("expenseEventName").textContent = eventTitle(event);
@@ -1611,36 +1652,44 @@ async function saveContribution(event) {
   const formData = new FormData(form);
   const flat = String(formData.get("flat") || "").trim();
   const amount = Number(formData.get("amount"));
-  const expectedAmount = Number(event?.contributionAmount || 500);
-  if (!formData.get("name") || amount !== expectedAmount) { showToast(`Select a resident. The contribution amount for this event is ₹${expectedAmount}.`, "warning"); return; }
-  if (checkContributionDuplicate()) { showToast(`Contribution already recorded for Flat ${flat}.`, "warning"); return; }
+  const editingId = form.dataset.editingContributionId || "";
+  if (!String(formData.get("name") || "").trim()) { showToast("Owner / resident name is required.", "warning"); return; }
+  if (!editingId && (!flat || !String(formData.get("floor") || "").trim())) { showToast("Select a floor and flat before saving.", "warning"); return; }
+  if (!Number.isFinite(amount) || amount <= 0) { showToast("Enter a valid contribution amount.", "warning"); return; }
   if (formData.get("paymentMode") !== "Cash" && !String(formData.get("reference") || "").trim()) { showToast("Enter the UPI or bank transaction reference before saving this contribution.", "warning"); return; }
   const button = byId("saveContribution");
-  beginPortalWork("Recording contribution…");
+  beginPortalWork(editingId ? "Updating contribution…" : "Recording contribution…");
   button.disabled = true; button.textContent = "Saving…";
   try {
-    await adminConsoleCall({ action: "recordContribution", payload: { eventId: event.id, name: formData.get("name"), floor: formData.get("floor"), flat: formData.get("flat"), amount, paymentMode: formData.get("paymentMode"), reference: formData.get("reference") } });
-    form.reset(); syncPaymentReferenceFields(); lockContributionAmount(); await refreshEventFinance(event.id); byId("contributionFormModal").close(); showToast("Contribution recorded successfully.", "success");
+    if (editingId) {
+      await adminConsoleCall({ action: "editContribution", payload: { eventId: event.id, contributionId: editingId, name: formData.get("name"), amount, paymentMode: formData.get("paymentMode"), reference: formData.get("reference") } });
+    } else {
+      await adminConsoleCall({ action: "recordContribution", payload: { eventId: event.id, name: formData.get("name"), floor: formData.get("floor"), flat, amount, paymentMode: formData.get("paymentMode"), reference: formData.get("reference") } });
+    }
+    delete form.dataset.editingContributionId;
+    form.reset(); syncPaymentReferenceFields(); await refreshEventFinance(event.id); byId("contributionFormModal").close();
+    showToast(editingId ? "Contribution updated." : "Contribution recorded successfully.", "success");
   } catch (error) { console.error("Unable to save contribution", error); showToast(error.message || "Contribution could not be saved. Please try again.", "error"); }
   finally { button.disabled = false; button.innerHTML = '<i class="fa-solid fa-circle-check" aria-hidden="true"></i> Save contribution'; endPortalWork(); }
 }
 
-function lockContributionAmount() {
+// The contribution amount is now a free, editable numeric box (no fixed/minimum).
+// We pre-fill the event's amount as an editable convenience default.
+function setupContributionAmount() {
   const current = activeEvent();
   const input = byId("contributionForm")?.elements.amount;
-  const targetAmount = Math.max(1, Number(current?.contributionAmount || 500));
+  const defaultAmount = Math.max(1, Number(current?.contributionAmount || 500));
   if (input) {
-    input.value = String(targetAmount);
-    input.min = String(targetAmount);
-    input.max = String(targetAmount);
+    input.value = String(defaultAmount);
+    input.removeAttribute("max");
+    input.min = "1";
     input.step = "1";
-    input.readOnly = true;
-    input.setAttribute("aria-label", `Contribution amount ₹${targetAmount}`);
+    input.readOnly = false;
+    input.setAttribute("aria-label", "Contribution amount");
   }
   const infoNoteText = byId("contributionInfoNoteText");
   if (infoNoteText) {
-    const title = current ? eventTitle(current) : "this event";
-    infoNoteText.innerHTML = `Standard event contribution amount for <strong>${escapeHtml(title)}</strong> is set at <strong>₹${targetAmount}</strong> per flat.`;
+    infoNoteText.innerHTML = `Enter the amount collected — it is not fixed, and a flat may contribute more than once.`;
   }
 }
 
@@ -1827,7 +1876,7 @@ try {
   alignExpenseFormWithPortal();
   addActionIcons();
   syncPaymentReferenceFields();
-  lockContributionAmount();
+  setupContributionAmount();
 } catch (e) {
   console.warn("Initial form setup warning:", e);
 }
@@ -2290,6 +2339,24 @@ byId("downloadFullReportBtn").addEventListener("click", async () => {
 });
 
 byId("viewContributionAction").addEventListener("click", () => byId("contributionHistoryModal").showModal());
+byId("contributionList")?.addEventListener("click", (e) => {
+  const editBtn = e.target.closest("[data-edit-contribution]");
+  if (editBtn) { try { byId("contributionHistoryModal")?.close(); openContributionEditor(JSON.parse(editBtn.dataset.editContribution)); } catch (err) { console.error("edit contribution", err); } return; }
+  const delBtn = e.target.closest("[data-delete-contribution]");
+  if (delBtn) deleteContributionFlow(delBtn.dataset.deleteContribution, delBtn.dataset.flat || "", Number(delBtn.dataset.amount || 0));
+});
+async function deleteContributionFlow(contributionId, flat, amount) {
+  const event = activeEvent();
+  if (!event || !contributionId) return;
+  if (!window.confirm(`Delete the ₹${Number(amount || 0).toLocaleString("en-IN")} contribution for Flat ${flat}? This cannot be undone.`)) return;
+  beginPortalWork("Removing contribution…");
+  try {
+    await adminConsoleCall({ action: "deleteContribution", payload: { eventId: event.id, contributionId } });
+    await refreshEventFinance(event.id);
+    showToast("Contribution removed.", "success");
+  } catch (error) { console.error("Unable to delete contribution", error); showToast(error.message || "Contribution could not be removed.", "error"); }
+  finally { endPortalWork(); }
+}
 byId("viewAdditionalContributionAction")?.addEventListener("click", () => byId("additionalContributionHistoryModal").showModal());
 byId("viewExpenseAction").addEventListener("click", () => { renderExpenseHistory(); byId("expenseHistoryModal").showModal(); });
 byId("expenseHistorySearch").addEventListener("input", renderExpenseHistory);

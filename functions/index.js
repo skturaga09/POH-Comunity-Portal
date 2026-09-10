@@ -611,6 +611,18 @@ function eventSpocFor(event, callerFlat) {
   return spocs.find((s) => String(s.flat || "").trim().toUpperCase() === callerFlat) || null;
 }
 
+// Contribution management access: admins + committee (DIRECTORY_EDITOR_ROLES)
+// have full access to any floor; a floor SPOC may manage only their own floor.
+// Throws HttpsError if the caller isn't permitted for `floor`.
+async function assertCanManageContribution(caller, eventData, floor) {
+  if (DIRECTORY_EDITOR_ROLES.includes(caller.profile.role)) return;
+  const callerFlat = await resolveCallerFlat(caller);
+  const spocMatch = eventSpocFor(eventData, callerFlat);
+  if (!spocMatch) throw new HttpsError("permission-denied", "Only the floor SPOC, an administrator, or a committee member can manage contributions for this event.");
+  const spocFloor = String(spocMatch.floor || "").trim();
+  if (spocFloor && floor && spocFloor !== floor) throw new HttpsError("permission-denied", `As the Floor ${spocFloor} SPOC you can manage contributions only for your own floor.`);
+}
+
 async function writeAudit(action, entity, detail, actor) {
   await db.collection("auditLogs").add({ action, entity, detail, actor: actor.email || actor.uid, actorName: actor.profile?.name || actor.email || "Portal user", createdAt: admin.firestore.FieldValue.serverTimestamp() });
 }
@@ -924,36 +936,71 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
 
     const eventSnap = await db.collection("events").doc(eventId).get();
     if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
-    const expectedAmount = Math.max(1, Number(eventSnap.data().contributionAmount || 500));
+    const eventData = eventSnap.data();
 
     if (!eventId || !flat || !floor || !name) throw new HttpsError("invalid-argument", "Select a floor and flat before saving this contribution.");
-    if (amount !== expectedAmount) throw new HttpsError("invalid-argument", `The contribution amount for this event is ₹${expectedAmount}.`);
+    // Amount is now free-form (variable) — the SPOC enters what was collected.
+    if (!Number.isFinite(amount) || amount <= 0) throw new HttpsError("invalid-argument", "Enter a valid contribution amount.");
     if (!["UPI", "Cash", "Bank Transfer"].includes(paymentMode)) throw new HttpsError("invalid-argument", "Choose a valid payment mode.");
     if (paymentMode !== "Cash" && !reference) throw new HttpsError("invalid-argument", "Enter the UPI or bank transaction reference.");
+    if (isClosedEventData(eventData)) throw new HttpsError("failed-precondition", "This event is settled and closed; contributions can no longer be added.");
 
-    // Only the floor SPOC (for their own floor) or an administrator may record
-    // contributions — ordinary residents cannot.
-    const contributionIsAdmin = ADMIN_ROLES.includes(caller.profile.role);
-    if (!contributionIsAdmin) {
-      const callerFlat = await resolveCallerFlat(caller);
-      const spocMatch = eventSpocFor(eventSnap.data(), callerFlat);
-      if (!spocMatch) throw new HttpsError("permission-denied", "Only the floor SPOC or an administrator can record contributions for this event.");
-      const spocFloor = String(spocMatch.floor || "").trim();
-      if (spocFloor && floor && spocFloor !== floor) throw new HttpsError("permission-denied", `As the Floor ${spocFloor} SPOC you can record contributions only for your own floor.`);
-    }
-
-    // Strict Duplicate Flat Check across all contributions for this event
-    const existingSnap = await db.collection("events").doc(eventId).collection("contributions").get();
-    const duplicate = existingSnap.docs.find((doc) => {
-      const data = doc.data();
-      return String(data.flat || data.flatNo || "").trim().toUpperCase() === flat.toUpperCase();
-    });
-    if (duplicate) throw new HttpsError("already-exists", `A contribution has already been recorded for Flat ${flat} for this event.`);
+    // Access: floor SPOC (own floor) or admin/committee (any floor). Multiple
+    // contributions per flat are allowed — no duplicate block.
+    await assertCanManageContribution(caller, eventData, floor);
 
     const contributionRef = db.collection("events").doc(eventId).collection("contributions").doc();
-    await contributionRef.set({ id: contributionRef.id, eventId, floor, flat, name, amount: expectedAmount, paymentMode, reference, status: "Received", date: new Date().toISOString(), createdAt: admin.firestore.FieldValue.serverTimestamp(), recordedBy: caller.email });
-    await writeAudit("Recorded contribution", "Contribution", `${flat} · ${String(eventSnap.data().name || eventId)} · ₹${expectedAmount}`, caller);
-    return { id: contributionRef.id, amount: expectedAmount };
+    await contributionRef.set({ id: contributionRef.id, eventId, floor, flat, name, amount, paymentMode, reference, status: "Received", date: new Date().toISOString(), createdAt: FIELD_VALUE.serverTimestamp(), recordedBy: caller.email });
+    await writeAudit("Recorded contribution", "Contribution", `${flat} · ${String(eventData.name || eventId)} · ₹${Math.round(amount)}`, caller);
+    return { id: contributionRef.id, amount };
+  }
+  if (action === "editContribution") {
+    ensureActive(caller.profile);
+    const eventId = String(payload.eventId || "");
+    const contributionId = String(payload.contributionId || "");
+    if (!eventId || !contributionId) throw new HttpsError("invalid-argument", "Event ID and contribution ID are required.");
+    const eventSnap = await db.collection("events").doc(eventId).get();
+    if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
+    const eventData = eventSnap.data();
+    if (isClosedEventData(eventData)) throw new HttpsError("failed-precondition", "This event is settled and closed; its contributions can no longer be edited.");
+    const ref = db.collection("events").doc(eventId).collection("contributions").doc(contributionId);
+    const snap = await ref.get();
+    if (!snap.exists) throw new HttpsError("not-found", "Contribution not found.");
+    const before = snap.data();
+    await assertCanManageContribution(caller, eventData, String(before.floor || "").trim());
+    const updates = { updatedBy: caller.email, updatedAt: FIELD_VALUE.serverTimestamp() };
+    if (payload.amount !== undefined) {
+      const amt = Number(payload.amount);
+      if (!Number.isFinite(amt) || amt <= 0) throw new HttpsError("invalid-argument", "Enter a valid contribution amount.");
+      updates.amount = amt;
+    }
+    if (payload.name !== undefined) updates.name = String(payload.name || "").trim();
+    if (payload.paymentMode !== undefined) {
+      if (!["UPI", "Cash", "Bank Transfer"].includes(payload.paymentMode)) throw new HttpsError("invalid-argument", "Choose a valid payment mode.");
+      updates.paymentMode = payload.paymentMode;
+    }
+    if (payload.reference !== undefined) updates.reference = String(payload.reference || "").trim();
+    await ref.set(updates, { merge: true });
+    await writeAudit("Edited contribution", "Contribution", `${before.flat} · ${String(eventData.name || eventId)} · ₹${Math.round(updates.amount ?? before.amount ?? 0)}`, caller);
+    return { ok: true };
+  }
+  if (action === "deleteContribution") {
+    ensureActive(caller.profile);
+    const eventId = String(payload.eventId || "");
+    const contributionId = String(payload.contributionId || "");
+    if (!eventId || !contributionId) throw new HttpsError("invalid-argument", "Event ID and contribution ID are required.");
+    const eventSnap = await db.collection("events").doc(eventId).get();
+    if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
+    const eventData = eventSnap.data();
+    if (isClosedEventData(eventData)) throw new HttpsError("failed-precondition", "This event is settled and closed; its contributions can no longer be removed.");
+    const ref = db.collection("events").doc(eventId).collection("contributions").doc(contributionId);
+    const snap = await ref.get();
+    if (!snap.exists) throw new HttpsError("not-found", "Contribution not found.");
+    const before = snap.data();
+    await assertCanManageContribution(caller, eventData, String(before.floor || "").trim());
+    await ref.delete();
+    await writeAudit("Deleted contribution", "Contribution", `${before.flat} · ${String(eventData.name || eventId)} · ₹${Math.round(before.amount || 0)}`, caller);
+    return { ok: true };
   }
   if (action === "recordAdditionalContribution") {
     // Post-settlement "deficit recovery": SPOCs/admins record additional,
