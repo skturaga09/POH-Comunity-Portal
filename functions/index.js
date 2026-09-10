@@ -1160,7 +1160,8 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
       const existingEvents = await db.collection("events").get();
       const batch = db.batch();
       existingEvents.docs.forEach((entry) => {
-        if (entry.id === eventRef.id || /^closed$/i.test(String(entry.data().status || ""))) return;
+        // Never demote a completed/closed/settled (past) event back to "Upcoming".
+        if (entry.id === eventRef.id || isClosedEventData(entry.data())) return;
         batch.set(entry.ref, { active: false, status: "Upcoming", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       });
       batch.set(eventRef, eventData, { merge: true });
@@ -1185,7 +1186,8 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     const events = await db.collection("events").get();
     const batch = db.batch();
     events.docs.forEach((entry) => {
-      if (entry.id === eventId || /^closed$/i.test(String(entry.data().status || ""))) return;
+      // Never demote a completed/closed/settled (past) event back to "Upcoming".
+      if (entry.id === eventId || isClosedEventData(entry.data())) return;
       batch.set(entry.ref, { active: false, status: "Upcoming", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     });
     batch.set(eventRef, { active: true, status: "Active", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });

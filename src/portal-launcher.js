@@ -635,11 +635,12 @@ function renderEvents() {
     const balance = finance.collected + poolAllocated - finance.spent;
     const isActive = eventStatus(event) === "Active";
     const isDone = isClosed(event);
+    // Every event's dashboard is viewable at any time (read-only finance view).
     const actionBtn = isActive
       ? `<button class="solid-button" type="button" data-open-event="${escapeHtml(event.id)}">Open event dashboard <i class="fa-solid fa-arrow-right" aria-hidden="true"></i></button>`
       : isDone
       ? `<button class="solid-button" type="button" data-open-event="${escapeHtml(event.id)}" style="background:#183e35;border-color:#183e35;"><i class="fa-solid fa-eye" style="margin-right:6px;" aria-hidden="true"></i> View Dashboard (Completed)</button>`
-      : `<button class="solid-button" type="button" disabled style="opacity:0.6;cursor:not-allowed;background:#687870;box-shadow:none;" title="Event dashboard is open only when event status is Active or Completed">Dashboard Locked (${escapeHtml(eventStatus(event))}) <i class="fa-solid fa-lock" style="margin-left:6px;" aria-hidden="true"></i></button>`;
+      : `<button class="solid-button" type="button" data-open-event="${escapeHtml(event.id)}" style="background:#42605a;border-color:#42605a;"><i class="fa-solid fa-eye" style="margin-right:6px;" aria-hidden="true"></i> View dashboard (${escapeHtml(eventStatus(event))})</button>`;
     return `<article class="event-card"><div class="event-card-top"><span class="state-pill">${escapeHtml(eventStatus(event))}</span><i class="fa-solid fa-calendar-days" aria-hidden="true"></i></div><h3>${escapeHtml(eventTitle(event))}</h3><p>${escapeHtml(textOr(event.description, "A shared community celebration."))}</p><small class="event-date"><i class="fa-regular fa-calendar" aria-hidden="true"></i> ${escapeHtml(eventDetail(event))} · Suggested: ₹${event.contributionAmount || 500}/flat</small><div class="event-finance"><span>Contributions <strong>${money(finance.collected)}</strong></span><span>Pool in use <strong>${money(poolAllocated)}</strong></span><span>Spent <strong>${money(finance.spent)}</strong></span><span class="${balance < 0 ? "negative" : ""}">Available <strong>${money(balance)}</strong></span></div>${actionBtn}</article>`;
   }).join("") : empty("No events have been migrated. Use the Admin console to create your first community event.");
 }
@@ -2065,16 +2066,9 @@ byId("residentParkingAudit").addEventListener("click", async () => {
 byId("eventGrid").addEventListener("click", async (event) => {
   const id = event.target.closest("[data-open-event]")?.dataset.openEvent;
   if (id) {
-    const selectedEvt = portalData.events.find((e) => e.id === id);
-    // The dashboard is viewable for Active events and for Completed/closed events
-    // (matches the card button and the home-page "Open event" behaviour). Only
-    // not-yet-started events (Planning/Upcoming) stay locked.
-    if (selectedEvt && eventStatus(selectedEvt) !== "Active" && !isClosed(selectedEvt)) {
-      showToast(`The dashboard opens once this event is Active or Completed (currently ${eventStatus(selectedEvt)}).`, "warning");
-      return;
-    }
+    // Any event's dashboard is viewable at any time (read-only finance view).
     activeEventId = id;
-    await ensureEventFinance(id); // no-op if already loaded (active events are)
+    await ensureEventFinance(id);
     renderEventDashboard();
     activateRoute("eventDashboard");
   }
