@@ -3535,7 +3535,9 @@ function formatPhoneDisplay(digits) {
 // card canvas. Any UPI app (GPay, PhonePe, Paytm, bank apps) reads the same code.
 function drawUpiQr(ctx, upiId, payeeName, x, y, size) {
   try {
-    const upiUrl = `upi://pay?pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(payeeName || "POH SPOC")}&cu=INR`;
+    // Keep the VPA literal — percent-encoding the "@" (to %40) makes several UPI apps
+    // fail to resolve the payee/name. Only the display name needs URL-encoding.
+    const upiUrl = `upi://pay?pa=${upiId}&pn=${encodeURIComponent(payeeName || "POH SPOC")}&cu=INR`;
     const qr = qrcode(0, "M");
     qr.addData(upiUrl);
     qr.make();
