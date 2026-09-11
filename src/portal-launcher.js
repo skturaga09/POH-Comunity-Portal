@@ -3554,6 +3554,49 @@ function drawUpiQr(ctx, upiId, payeeName, x, y, size) {
   } catch (err) { console.error("UPI QR generation failed", err); }
 }
 
+// Festive mango-leaf toran (hanging garland) — a string with alternating green leaves
+// and gold tips. Drawn (not an image) so it bakes into the shared PNG on any device.
+function drawToran(ctx, y, w) {
+  ctx.strokeStyle = "#c98a2e";
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(42, y); ctx.lineTo(w - 42, y); ctx.stroke();
+  const n = 13, x0 = 48, span = (w - 96) / (n - 1);
+  for (let i = 0; i < n; i++) {
+    const x = x0 + i * span;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.quadraticCurveTo(x - 7, y + 11, x, y + 24);
+    ctx.quadraticCurveTo(x + 7, y + 11, x, y);
+    ctx.closePath();
+    ctx.fillStyle = i % 2 ? "#1e5a3f" : "#2f7350";
+    ctx.fill();
+    ctx.beginPath(); ctx.arc(x, y + 25, 1.8, 0, Math.PI * 2); ctx.fillStyle = "#d99a32"; ctx.fill();
+  }
+}
+
+// A small lit diya (oil lamp) motif.
+function drawDiya(ctx, x, y) {
+  ctx.beginPath();
+  ctx.moveTo(x - 11, y);
+  ctx.quadraticCurveTo(x, y + 10, x + 11, y);
+  ctx.closePath();
+  ctx.fillStyle = "#b5732a"; ctx.fill();
+  ctx.beginPath(); ctx.moveTo(x - 11, y); ctx.lineTo(x + 11, y);
+  ctx.strokeStyle = "#8a561f"; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x, y - 2);
+  ctx.quadraticCurveTo(x - 5, y - 9, x, y - 18);
+  ctx.quadraticCurveTo(x + 5, y - 9, x, y - 2);
+  ctx.closePath();
+  ctx.fillStyle = "#e8a83a"; ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(x, y - 4);
+  ctx.quadraticCurveTo(x - 2.5, y - 8, x, y - 13);
+  ctx.quadraticCurveTo(x + 2.5, y - 8, x, y - 4);
+  ctx.closePath();
+  ctx.fillStyle = "#f6d06a"; ctx.fill();
+}
+
 function generateReminderCardImage(details) {
   const canvas = byId("reminderCardCanvas");
   if (!canvas) return;
@@ -3561,7 +3604,7 @@ function generateReminderCardImage(details) {
 
   const hasQr = Boolean(details.spocUpi);
   const w = 540;
-  const h = hasQr ? 740 : 540;
+  const h = hasQr ? 770 : 570;
   canvas.width = w;
   canvas.height = h;
 
@@ -3592,66 +3635,60 @@ function generateReminderCardImage(details) {
       ctx.drawImage(logo, (w - logoW) / 2, 22, logoW, logoH);
     }
 
-    // Divider Line
-    ctx.strokeStyle = "#dce4dc";
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(40, 172);
-    ctx.lineTo(w - 40, 172);
-    ctx.stroke();
+    // Festive toran (mango-leaf garland) under the crest
+    drawToran(ctx, 180, w);
 
     // Reminder Title Banner
     ctx.fillStyle = "#183e35";
-    ctx.fillRect(40, 186, w - 80, 36);
+    ctx.fillRect(40, 210, w - 80, 36);
     ctx.fillStyle = "#ffffff";
     ctx.font = "bold 16px 'Space Grotesk', sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText("Event Contribution Reminder", w / 2, 210);
+    ctx.fillText("Event Contribution Reminder", w / 2, 234);
 
     // EVENT — highlighted first, in a gold banner
     ctx.fillStyle = "#f6ead2";
-    ctx.fillRect(40, 234, w - 80, 44);
+    ctx.fillRect(40, 258, w - 80, 46);
     ctx.strokeStyle = "#e6c987";
     ctx.lineWidth = 1.5;
-    ctx.strokeRect(40, 234, w - 80, 44);
+    ctx.strokeRect(40, 258, w - 80, 46);
     ctx.fillStyle = "#7a5a12";
-    ctx.font = "bold 23px 'Space Grotesk', sans-serif";
-    ctx.fillText(details.eventName || "Community Event", w / 2, 264);
+    ctx.font = "bold 24px 'Space Grotesk', sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(details.eventName || "Community Event", w / 2, 289);
 
     // Flat + owner (secondary)
     ctx.fillStyle = "#183e35";
     ctx.font = "bold 21px 'Space Grotesk', sans-serif";
-    ctx.fillText(`Flat ${details.flatStr} · ${details.resName || "Resident"}`, w / 2, 304);
+    ctx.fillText(`Flat ${details.flatStr} · ${details.resName || "Resident"}`, w / 2, 332);
 
-    // Minimum contribution + voluntary note
-    const minAmount = Math.max(500, Number(details.expectedAmount) || 0);
-    ctx.fillStyle = "#5f6b62";
-    ctx.font = "bold 13px sans-serif";
-    ctx.fillText("Minimum Contribution", w / 2, 336);
-    ctx.fillStyle = "#183e35";
-    ctx.font = "bold 30px 'Space Grotesk', sans-serif";
-    ctx.fillText(`₹${minAmount.toLocaleString("en-IN")}`, w / 2, 370);
+    // Open-hearted invitation — deliberately NO amount (avoids anchoring)
+    ctx.fillStyle = "#b5732a";
+    ctx.font = "bold 20px 'Space Grotesk', sans-serif";
+    ctx.fillText("Give from the heart", w / 2, 384);
+    drawDiya(ctx, w / 2 - 118, 379);
+    drawDiya(ctx, w / 2 + 118, 379);
     ctx.fillStyle = "#2c4a3e";
-    ctx.font = "13px sans-serif";
-    ctx.fillText("Anything above is entirely your wish — every extra", w / 2, 394);
-    ctx.fillText("rupee helps make the celebration bigger.", w / 2, 412);
+    ctx.font = "14px sans-serif";
+    ctx.fillText("Contribute any amount you wish — every rupee", w / 2, 412);
+    ctx.fillText("adds to the joy of our celebration.", w / 2, 432);
 
     // Status
     ctx.fillStyle = "#8b6416";
     ctx.font = "bold 15px sans-serif";
-    ctx.fillText("Status: Pending / Unpaid", w / 2, 440);
+    ctx.fillText("Status: Pending / Unpaid", w / 2, 462);
 
     // Scan & Pay QR — only when the SPOC has a UPI ID on file
     if (hasQr) {
       ctx.fillStyle = "#183e35";
       ctx.font = "bold 14px 'Space Grotesk', sans-serif";
       ctx.textAlign = "center";
-      ctx.fillText("Scan & Pay — any UPI app", w / 2, 486);
+      ctx.fillText("Scan & Pay — any UPI app", w / 2, 506);
       const qrSize = 132;
-      drawUpiQr(ctx, details.spocUpi, details.spocName, (w - qrSize) / 2, 498, qrSize);
+      drawUpiQr(ctx, details.spocUpi, details.spocName, (w - qrSize) / 2, 518, qrSize);
       ctx.fillStyle = "#5f6b62";
       ctx.font = "12px sans-serif";
-      ctx.fillText(`UPI: ${details.spocUpi}`, w / 2, 652);
+      ctx.fillText(`UPI: ${details.spocUpi}`, w / 2, 672);
     }
 
     // Footer Divider & SPOC signature (name + phone), anchored to the card bottom
