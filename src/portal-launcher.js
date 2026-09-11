@@ -3665,9 +3665,9 @@ function generateReminderCardImage(details) {
     // Open-hearted invitation — deliberately NO amount (avoids anchoring)
     ctx.fillStyle = "#b5732a";
     ctx.font = "bold 20px 'Space Grotesk', sans-serif";
-    ctx.fillText("Give from the heart", w / 2, 384);
-    drawDiya(ctx, w / 2 - 118, 379);
-    drawDiya(ctx, w / 2 + 118, 379);
+    ctx.fillText("Every contribution counts", w / 2, 384);
+    drawDiya(ctx, w / 2 - 192, 379);
+    drawDiya(ctx, w / 2 + 192, 379);
     ctx.fillStyle = "#2c4a3e";
     ctx.font = "14px sans-serif";
     ctx.fillText("Contribute any amount you wish — every rupee", w / 2, 412);
