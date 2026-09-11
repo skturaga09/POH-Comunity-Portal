@@ -3522,12 +3522,20 @@ function getFloorSpocUpi(eventObj, floorStr) {
 }
 
 function residentPhoneDigits(r) {
-  return String(r?.ownerPrimaryPhone || r?.primaryPhone || r?.phone || r?.mobile || r?.ownerSecondaryPhone || r?.tenantPrimaryPhone || "").replace(/\D/g, "");
+  const candidates = [r?.ownerPrimaryPhone, r?.ownerMobile, r?.primaryPhone, r?.phone, r?.mobile,
+                      r?.ownerSecondaryPhone, r?.tenantPrimaryPhone, r?.tenantMobile]
+    .map((v) => String(v || "").replace(/\D/g, "")).filter(Boolean);
+  // Prefer a well-formed mobile (10 digits, 12 starting 91, or 11 starting 0) over a
+  // partial/garbled field that merely happens to come first.
+  const valid = candidates.find((d) => d.length === 10 || (d.length === 12 && d.startsWith("91")) || (d.length === 11 && d.startsWith("0")));
+  return valid || candidates[0] || "";
 }
 
 function formatPhoneDisplay(digits) {
   const d = String(digits || "").replace(/\D/g, "");
-  const ten = d.length === 12 && d.startsWith("91") ? d.slice(2) : d;
+  let ten = d;
+  if (d.length === 12 && d.startsWith("91")) ten = d.slice(2);
+  else if (d.length === 11 && d.startsWith("0")) ten = d.slice(1);
   return ten.length === 10 ? `+91 ${ten.slice(0, 5)} ${ten.slice(5)}` : (d ? `+${d}` : "");
 }
 
