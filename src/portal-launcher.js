@@ -3477,7 +3477,7 @@ function getFloorSpocName(eventObj, floorStr) {
 
   // Detect if the value is a FLAT NUMBER (digits, optionally followed by a letter: e.g. "410", "621A")
   // vs. a NAME directly stored (Apps Script import: e.g. "Naveen", "Rajesh Sharma")
-  const isFlatNumber = /^\d+[A-Za-z]?$/.test(flatVal);
+  const isFlatNumber = /^[A-Za-z]?\d+[A-Za-z]?$/.test(flatVal);
 
   if (isFlatNumber) {
     // Look up the resident by flat number and return their name
@@ -3502,7 +3502,7 @@ function getFloorSpocResident(eventObj, floorStr) {
   const spocs = Array.isArray(eventObj.spocs) ? eventObj.spocs : [];
   const spocEntry = spocs.find((s) => String(s.floor ?? "").trim() === String(floorStr).trim());
   const flatVal = String(spocEntry?.flat || "").trim();
-  if (!flatVal || !/^\d+[A-Za-z]?$/.test(flatVal)) return null;
+  if (!flatVal || !/^[A-Za-z]?\d+[A-Za-z]?$/.test(flatVal)) return null;
   const norm = flatVal.replace(/^0+/, "").toUpperCase();
   return portalData.residents.find((r) => {
     const rFlat = String(r.flat || "").trim().replace(/^0+/, "").toUpperCase();
