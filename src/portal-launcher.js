@@ -3488,6 +3488,33 @@ function getFloorSpocName(eventObj, floorStr) {
   return flatVal;
 }
 
+// Resolve the SPOC's own resident record for a floor (flat-number SPOC entries only),
+// so the card can show the SPOC's phone (and, later, their UPI ID for the pay QR).
+function getFloorSpocResident(eventObj, floorStr) {
+  if (!eventObj || !floorStr) return null;
+  const spocs = Array.isArray(eventObj.spocs) ? eventObj.spocs : [];
+  const spocEntry = spocs.find((s) => String(s.floor ?? "").trim() === String(floorStr).trim());
+  const flatVal = String(spocEntry?.flat || "").trim();
+  if (!flatVal || !/^\d+[A-Za-z]?$/.test(flatVal)) return null;
+  const norm = flatVal.replace(/^0+/, "").toUpperCase();
+  return portalData.residents.find((r) => {
+    const rFlat = String(r.flat || "").trim().replace(/^0+/, "").toUpperCase();
+    const rFlatNo = String(r.flatNo || "").trim().replace(/^0+/, "").toUpperCase();
+    const rId = String(r.id || "").trim().replace(/^0+/, "").toUpperCase();
+    return rFlat === norm || rFlatNo === norm || rId === norm;
+  }) || null;
+}
+
+function residentPhoneDigits(r) {
+  return String(r?.ownerPrimaryPhone || r?.primaryPhone || r?.phone || r?.mobile || r?.ownerSecondaryPhone || r?.tenantPrimaryPhone || "").replace(/\D/g, "");
+}
+
+function formatPhoneDisplay(digits) {
+  const d = String(digits || "").replace(/\D/g, "");
+  const ten = d.length === 12 && d.startsWith("91") ? d.slice(2) : d;
+  return ten.length === 10 ? `+91 ${ten.slice(0, 5)} ${ten.slice(5)}` : (d ? `+${d}` : "");
+}
+
 function generateReminderCardImage(details) {
   const canvas = byId("reminderCardCanvas");
   if (!canvas) return;
@@ -3535,43 +3562,63 @@ function generateReminderCardImage(details) {
 
     // Reminder Title Banner
     ctx.fillStyle = "#183e35";
-    ctx.fillRect(40, 190, w - 80, 40);
+    ctx.fillRect(40, 186, w - 80, 36);
     ctx.fillStyle = "#ffffff";
-    ctx.font = "bold 17px 'Space Grotesk', sans-serif";
+    ctx.font = "bold 16px 'Space Grotesk', sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText("Event Contribution Reminder", w / 2, 216);
+    ctx.fillText("Event Contribution Reminder", w / 2, 210);
 
-    // Target Resident & Flat (Increased font size)
+    // EVENT — highlighted first, in a gold banner
+    ctx.fillStyle = "#f6ead2";
+    ctx.fillRect(40, 234, w - 80, 44);
+    ctx.strokeStyle = "#e6c987";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(40, 234, w - 80, 44);
+    ctx.fillStyle = "#7a5a12";
+    ctx.font = "bold 23px 'Space Grotesk', sans-serif";
+    ctx.fillText(details.eventName || "Community Event", w / 2, 264);
+
+    // Flat + owner (secondary)
     ctx.fillStyle = "#183e35";
-    ctx.font = "bold 26px 'Space Grotesk', sans-serif";
-    ctx.fillText(`Flat ${details.flatStr} · ${details.resName || "Resident"}`, w / 2, 275);
+    ctx.font = "bold 21px 'Space Grotesk', sans-serif";
+    ctx.fillText(`Flat ${details.flatStr} · ${details.resName || "Resident"}`, w / 2, 304);
 
-    // Event & Contribution Details (Increased font size)
-    ctx.fillStyle = "#2c3e35";
-    ctx.font = "bold 18px sans-serif";
-    ctx.fillText(`Event: ${details.eventName}`, w / 2, 320);
+    // Minimum contribution + voluntary note
+    const minAmount = Math.max(500, Number(details.expectedAmount) || 0);
+    ctx.fillStyle = "#5f6b62";
+    ctx.font = "bold 13px sans-serif";
+    ctx.fillText("Minimum Contribution", w / 2, 336);
+    ctx.fillStyle = "#183e35";
+    ctx.font = "bold 30px 'Space Grotesk', sans-serif";
+    ctx.fillText(`₹${minAmount.toLocaleString("en-IN")}`, w / 2, 370);
+    ctx.fillStyle = "#2c4a3e";
+    ctx.font = "13px sans-serif";
+    ctx.fillText("Anything above is entirely your wish — every extra", w / 2, 394);
+    ctx.fillText("rupee helps make the celebration bigger.", w / 2, 412);
 
-    ctx.fillStyle = "#9c3f34";
-    ctx.font = "bold 22px 'Space Grotesk', sans-serif";
-    ctx.fillText(`Contribution Due: ₹${details.expectedAmount.toLocaleString("en-IN")}`, w / 2, 362);
-
+    // Status
     ctx.fillStyle = "#8b6416";
-    ctx.font = "bold 16px sans-serif";
-    ctx.fillText("Status: Pending / Unpaid", w / 2, 400);
+    ctx.font = "bold 15px sans-serif";
+    ctx.fillText("Status: Pending / Unpaid", w / 2, 440);
 
-    // Footer Divider & SPOC Signature
+    // Footer Divider & SPOC signature (name + phone)
     ctx.strokeStyle = "#dce4dc";
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.moveTo(40, 438);
-    ctx.lineTo(w - 40, 438);
+    ctx.moveTo(40, 464);
+    ctx.lineTo(w - 40, 464);
     ctx.stroke();
 
     ctx.fillStyle = "#183e35";
-    ctx.font = "bold 16px sans-serif";
+    ctx.font = "bold 15px sans-serif";
     ctx.textAlign = "right";
     const spocDisplay = details.spocName ? `Floor ${details.floorStr} SPOC: ${details.spocName}` : `Floor ${details.floorStr} SPOC`;
-    ctx.fillText(spocDisplay, w - 45, 475);
+    ctx.fillText(spocDisplay, w - 45, 490);
+    if (details.spocPhone) {
+      ctx.fillStyle = "#5f6b62";
+      ctx.font = "bold 14px sans-serif";
+      ctx.fillText(details.spocPhone, w - 45, 510);
+    }
     ctx.textAlign = "left";
 
     const downloadLink = byId("downloadCardImgLink");
@@ -3646,10 +3693,12 @@ document.addEventListener("click", async (event) => {
     // Prefer the event matching the button's event-id; fall back to activeEvent()
     const eventObj = (eventId && portalData.events.find((e) => e.id === eventId)) || activeEvent();
     const spocName = getFloorSpocName(eventObj, floorStr);
+    const spocResident = getFloorSpocResident(eventObj, floorStr);
     const details = {
       flatStr: cardModalBtn.dataset.openCardModal,
       floorStr,
       spocName,
+      spocPhone: spocResident ? formatPhoneDisplay(residentPhoneDigits(spocResident)) : "",
       resName: cardModalBtn.dataset.resName,
       eventName: cardModalBtn.dataset.eventName,
       expectedAmount: Number(cardModalBtn.dataset.amount || 500),
