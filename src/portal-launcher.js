@@ -3495,21 +3495,34 @@ function getFloorSpocName(eventObj, floorStr) {
   return flatVal;
 }
 
-// Resolve the SPOC's own resident record for a floor (flat-number SPOC entries only),
-// so the card can show the SPOC's phone (and, later, their UPI ID for the pay QR).
+// Resolve the SPOC's own resident record for a floor, so the card can show their phone.
+// Mirrors getFloorSpocName: a SPOC entry may hold a flat NUMBER (look up by flat) or a
+// NAME (Apps Script import — look up by resident name). Previously it handled only the
+// flat-number case, so a name-stored SPOC showed a name but no phone.
 function getFloorSpocResident(eventObj, floorStr) {
   if (!eventObj || !floorStr) return null;
   const spocs = Array.isArray(eventObj.spocs) ? eventObj.spocs : [];
   const spocEntry = spocs.find((s) => String(s.floor ?? "").trim() === String(floorStr).trim());
-  const flatVal = String(spocEntry?.flat || "").trim();
-  if (!flatVal || !/^[A-Za-z]?\d+[A-Za-z]?$/.test(flatVal)) return null;
-  const norm = flatVal.replace(/^0+/, "").toUpperCase();
-  return portalData.residents.find((r) => {
-    const rFlat = String(r.flat || "").trim().replace(/^0+/, "").toUpperCase();
-    const rFlatNo = String(r.flatNo || "").trim().replace(/^0+/, "").toUpperCase();
-    const rId = String(r.id || "").trim().replace(/^0+/, "").toUpperCase();
-    return rFlat === norm || rFlatNo === norm || rId === norm;
-  }) || null;
+  if (!spocEntry) return null;
+  const flatVal = String(spocEntry.flat || "").trim();
+  const isFlatNumber = flatVal && /^[A-Za-z]?\d+[A-Za-z]?$/.test(flatVal);
+  if (isFlatNumber) {
+    const norm = flatVal.replace(/^0+/, "").toUpperCase();
+    const byFlat = portalData.residents.find((r) => {
+      const rFlat = String(r.flat || "").trim().replace(/^0+/, "").toUpperCase();
+      const rFlatNo = String(r.flatNo || "").trim().replace(/^0+/, "").toUpperCase();
+      const rId = String(r.id || "").trim().replace(/^0+/, "").toUpperCase();
+      return rFlat === norm || rFlatNo === norm || rId === norm;
+    });
+    if (byFlat) return byFlat;
+  }
+  // Otherwise (or if no flat match) resolve by the SPOC's name — spocEntry.name, or a
+  // name stored directly in the flat field.
+  const nameVal = String(spocEntry.name || (isFlatNumber ? "" : flatVal)).trim().toLowerCase();
+  if (nameVal) {
+    return portalData.residents.find((r) => residentName(r).trim().toLowerCase() === nameVal) || null;
+  }
+  return null;
 }
 
 // The floor SPOC's UPI ID for the pay-QR, taken from the event's own SPOC assignment
