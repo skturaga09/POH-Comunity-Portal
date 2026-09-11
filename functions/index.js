@@ -600,34 +600,61 @@ function ensureRole(profile, roles) {
 
 // Resolve the caller's flat, preferring their profile, then matching their
 // email against any owner/tenant/family email in the directory.
+// Every resident email field a SPOC's login could be recorded under. Kept identical to
+// the client (getUserResidentRecord) so front end and back end resolve a SPOC the same
+// way — a mismatched list previously let one layer grant access while the other denied.
+const RESIDENT_EMAIL_FIELDS = [
+  "ownerEmail", "ownerPrimaryEmail", "ownerSecondaryEmail",
+  "tenantEmail", "tenantPrimaryEmail", "tenantSecondaryEmail",
+  "familyContactEmail", "primaryEmail", "secondaryEmail", "email",
+];
+function residentEmails(r) {
+  return RESIDENT_EMAIL_FIELDS.map((f) => String((r && r[f]) || "").trim().toLowerCase()).filter(Boolean);
+}
+
 async function resolveCallerFlat(caller) {
   const fromProfile = String(caller.profile?.flat || "").trim().toUpperCase();
   if (fromProfile) return fromProfile;
   const email = String(caller.email || "").trim().toLowerCase();
   if (!email) return "";
   const snap = await db.collection("residents").get();
-  const match = snap.docs.find((doc) => {
-    const r = doc.data();
-    return [r.ownerEmail, r.ownerPrimaryEmail, r.ownerSecondaryEmail, r.tenantEmail, r.tenantPrimaryEmail, r.tenantSecondaryEmail, r.familyContactEmail]
-      .map((e) => String(e || "").trim().toLowerCase()).includes(email);
-  });
+  const match = snap.docs.find((doc) => residentEmails(doc.data()).includes(email));
   return match ? String(match.data().flat || match.id).trim().toUpperCase() : "";
 }
 
-// Returns the caller's SPOC assignment for an event ({floor, flat}) or null.
-function eventSpocFor(event, callerFlat) {
-  if (!callerFlat) return null;
-  const spocs = Array.isArray(event?.spocs) ? event.spocs : [];
-  return spocs.find((s) => String(s.flat || "").trim().toUpperCase() === callerFlat) || null;
+// The caller's SPOC assignment ({floor, flat}) for a SPECIFIC event, or null.
+// Email-based and event-scoped: the caller is that event's SPOC for a flat when the
+// flat is in THIS event's spocs[] AND either their profile.flat matches it or their
+// login email is on that flat's resident record. Because spocs[] is per event, the
+// assignment applies only to this event and ends when it closes (contributions are
+// then frozen for everyone) — access never carries to other/future events.
+async function callerSpocAssignment(caller, eventData) {
+  const spocs = Array.isArray(eventData?.spocs) ? eventData.spocs : [];
+  if (!spocs.length) return null;
+  const spocByFlat = (flat) => spocs.find((s) => String(s.flat || "").trim().toUpperCase() === flat) || null;
+  const profileFlat = String(caller.profile?.flat || "").trim().toUpperCase();
+  if (profileFlat) {
+    const viaProfile = spocByFlat(profileFlat);
+    if (viaProfile) return viaProfile;
+  }
+  const email = String(caller.email || "").trim().toLowerCase();
+  if (!email) return null;
+  const spocFlats = new Set(spocs.map((s) => String(s.flat || "").trim().toUpperCase()).filter(Boolean));
+  const snap = await db.collection("residents").get();
+  for (const doc of snap.docs) {
+    const r = doc.data();
+    const flat = String(r.flat || doc.id).trim().toUpperCase();
+    if (spocFlats.has(flat) && residentEmails(r).includes(email)) return spocByFlat(flat);
+  }
+  return null;
 }
 
-// Contribution management access: admins + committee (DIRECTORY_EDITOR_ROLES)
-// have full access to any floor; a floor SPOC may manage only their own floor.
-// Throws HttpsError if the caller isn't permitted for `floor`.
+// Contribution management access: admins + committee (DIRECTORY_EDITOR_ROLES) have
+// full access to any floor; an event SPOC may manage only their own floor. Throws
+// HttpsError if the caller isn't permitted for `floor`.
 async function assertCanManageContribution(caller, eventData, floor) {
   if (DIRECTORY_EDITOR_ROLES.includes(caller.profile.role)) return;
-  const callerFlat = await resolveCallerFlat(caller);
-  const spocMatch = eventSpocFor(eventData, callerFlat);
+  const spocMatch = await callerSpocAssignment(caller, eventData);
   if (!spocMatch) throw new HttpsError("permission-denied", "Only the floor SPOC, an administrator, or a committee member can manage contributions for this event.");
   const spocFloor = String(spocMatch.floor || "").trim();
   if (spocFloor && floor && spocFloor !== floor) throw new HttpsError("permission-denied", `As the Floor ${spocFloor} SPOC you can manage contributions only for your own floor.`);
@@ -1057,8 +1084,7 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     // Same access as normal contributions: admin (any floor) or the floor SPOC.
     const isAdmin = ADMIN_ROLES.includes(caller.profile.role);
     if (!isAdmin) {
-      const callerFlat = await resolveCallerFlat(caller);
-      const spocMatch = eventSpocFor(eventData, callerFlat);
+      const spocMatch = await callerSpocAssignment(caller, eventData);
       if (!spocMatch) throw new HttpsError("permission-denied", "Only the floor SPOC or an administrator can record contributions for this event.");
       const spocFloor = String(spocMatch.floor || "").trim();
       if (spocFloor && floor && spocFloor !== floor) throw new HttpsError("permission-denied", `As the Floor ${spocFloor} SPOC you can record contributions only for your own floor.`);
@@ -1096,8 +1122,7 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     // Only the floor SPOC or an administrator may submit expenses.
     const expenseIsAdmin = ADMIN_ROLES.includes(caller.profile.role);
     if (!expenseIsAdmin) {
-      const callerFlat = await resolveCallerFlat(caller);
-      if (!eventSpocFor(event.data(), callerFlat)) throw new HttpsError("permission-denied", "Only the floor SPOC or an administrator can submit expenses for this event.");
+      if (!(await callerSpocAssignment(caller, event.data()))) throw new HttpsError("permission-denied", "Only the floor SPOC or an administrator can submit expenses for this event.");
     }
 
     const expenseRef = db.collection("events").doc(eventId).collection("expenses").doc();

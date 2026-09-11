@@ -1149,11 +1149,12 @@ function getUserResidentRecord() {
   if (!approvedProfile?.email) return null;
   const userEmail = approvedProfile.email.trim().toLowerCase();
   return portalData.residents.find((r) => {
+    // Keep this list identical to the backend RESIDENT_EMAIL_FIELDS so the two layers
+    // resolve a SPOC the same way (front end was missing ownerEmail / tenantEmail).
     const emails = [
-      r.ownerPrimaryEmail, r.primaryEmail, r.email,
-      r.ownerSecondaryEmail, r.secondaryEmail,
-      r.tenantPrimaryEmail, r.tenantSecondaryEmail,
-      r.familyContactEmail
+      r.ownerEmail, r.ownerPrimaryEmail, r.ownerSecondaryEmail,
+      r.tenantEmail, r.tenantPrimaryEmail, r.tenantSecondaryEmail,
+      r.familyContactEmail, r.primaryEmail, r.secondaryEmail, r.email
     ].filter(Boolean).map(e => String(e).trim().toLowerCase());
     return emails.includes(userEmail);
   }) || null;
@@ -1164,11 +1165,19 @@ function checkIsSpocOrAdmin(event) {
   const isAdmin = adminRoles.has(approvedProfile.role);
 
   const userResident = getUserResidentRecord();
-  const userFlat = userResident ? String(userResident.flat || userResident.flatNo || "").trim().toUpperCase() : "";
+  // Mirror the backend: a SPOC is matched by profile.flat OR the flat whose resident
+  // record carries their login email. Consider both so the controls show whenever the
+  // backend would allow the action.
+  const profileFlat = String(approvedProfile.flat || "").trim().toUpperCase();
+  const residentFlat = userResident ? String(userResident.flat || userResident.flatNo || "").trim().toUpperCase() : "";
+  const candidateFlats = [profileFlat, residentFlat].filter(Boolean);
   const userFloor = userResident ? String(userResident.floor || "").trim() : "";
 
   const spocs = Array.isArray(event?.spocs) ? event.spocs : [];
-  const spocMatch = spocs.find((s) => s.flat && userFlat && String(s.flat).trim().toUpperCase() === userFlat);
+  const spocMatch = spocs.find((s) => {
+    const f = String(s.flat || "").trim().toUpperCase();
+    return f && candidateFlats.includes(f);
+  });
   const isSpoc = Boolean(spocMatch);
   const spocFloor = spocMatch ? String(spocMatch.floor || userFloor) : (isSpoc ? userFloor : null);
 
