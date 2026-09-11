@@ -903,11 +903,6 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     const ownerPhotoUrl = String(payload.ownerPhotoUrl || "").trim();
     if (ownerPhotoUrl && !/^https:\/\//i.test(ownerPhotoUrl)) throw new HttpsError("invalid-argument", "The owner photo link is not valid.");
 
-    // SPOC UPI ID (VPA) used to render the scan-to-pay QR on contribution reminder
-    // cards. Optional; preserved when the field isn't sent (e.g. vehicle-only saves).
-    const upiId = payload.upiId !== undefined ? String(payload.upiId || "").trim() : String(before.upiId || "").trim();
-    if (upiId && !/^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z][a-zA-Z0-9.\-_]{1,64}$/.test(upiId)) throw new HttpsError("invalid-argument", "Enter a valid UPI ID, e.g. name@okaxis.");
-
     const next = {
       flat,
       flatNo: flat,
@@ -929,7 +924,6 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
       ownerName: String(payload.ownerName || before.ownerName || before.name || "").trim(),
       phone: String(payload.ownerMobile || payload.phone || before.phone || before.ownerMobile || "").trim(),
       ownerMobile: String(payload.ownerMobile || payload.phone || before.ownerMobile || before.phone || "").trim(),
-      upiId,
       tenantName: String(payload.tenantName || "").trim(),
       tenantMobile: String(payload.tenantMobile || "").trim(),
       isOutstation: Boolean(payload.isOutstation),
@@ -1193,7 +1187,11 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     if (!name) throw new HttpsError("invalid-argument", "Event name is required.");
     const status = String(payload.status || "Planning in progress");
     const contributionAmount = Math.max(1, Number(payload.contributionAmount || 500));
-    const spocs = Array.isArray(payload.spocs) ? payload.spocs.filter((item) => item.floor && item.flat) : [];
+    const spocs = Array.isArray(payload.spocs) ? payload.spocs.filter((item) => item && item.floor && item.flat).map((item) => {
+      const upiId = String(item.upiId || "").trim();
+      if (upiId && !/^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z][a-zA-Z0-9.\-_]{1,64}$/.test(upiId)) throw new HttpsError("invalid-argument", `Enter a valid UPI ID for the Floor ${item.floor} SPOC, e.g. name@okaxis.`);
+      return { floor: String(item.floor).trim(), flat: String(item.flat).trim(), ...(upiId ? { upiId } : {}) };
+    }) : [];
     if (/^active$/i.test(status)) {
       const residentFloors = new Set((await db.collection("residents").get()).docs.map((entry) => String(entry.data().floor || "Unassigned")));
       const spocFloors = new Set(spocs.map((entry) => String(entry.floor)));

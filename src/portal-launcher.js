@@ -819,7 +819,6 @@ function openResidentEditor(resident) {
   form.elements.parkingAllocation.value = resident.parkingAllocation || resident.parkingType || "";
   form.elements.parkingLevel.value = resident.parkingLevel || "";
   form.elements.parkingSlots.value = resident.parkingSlots || "";
-  if (form.elements.upiId) form.elements.upiId.value = resident.upiId || "";
   form.elements.ownerPhotoFile.value = "";
   byId("residentEditorFlatTitle").textContent = form.elements.flat.value;
   setResidentOwnerPhoto(resident.ownerPhotoUrl || resident.photoUrl || "");
@@ -1039,7 +1038,7 @@ function renderAdmin() {
   const floors = [...new Set(portalData.residents.map((resident) => String(resident.floor || "Unassigned")))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   byId("adminSpocFields").innerHTML = floors.map((floor) => {
     const residents = portalData.residents.filter((resident) => String(resident.floor || "Unassigned") === floor);
-    return `<label>Floor ${escapeHtml(floor)} SPOC<select data-spoc-floor="${escapeHtml(floor)}"><option value="">Choose a resident</option>${residents.map((resident) => `<option value="${escapeHtml(textOr(resident.flat || resident.flatNo, ""))}">${escapeHtml(textOr(resident.flat || resident.flatNo, "Flat"))} · ${escapeHtml(textOr(resident.ownerName || resident.name, "Owner pending"))}</option>`).join("")}</select></label>`;
+    return `<label>Floor ${escapeHtml(floor)} SPOC<select data-spoc-floor="${escapeHtml(floor)}"><option value="">Choose a resident</option>${residents.map((resident) => `<option value="${escapeHtml(textOr(resident.flat || resident.flatNo, ""))}">${escapeHtml(textOr(resident.flat || resident.flatNo, "Flat"))} · ${escapeHtml(textOr(resident.ownerName || resident.name, "Owner pending"))}</option>`).join("")}</select><input data-spoc-upi="${escapeHtml(floor)}" placeholder="SPOC UPI ID for pay-QR (e.g. name@okaxis)" style="margin-top:6px;"></label>`;
   }).join("") || empty("No resident floors are available.");
   byId("adminCommitteeList").innerHTML = portalData.committee.length ? portalData.committee.map((member) => `<article class="admin-person"><span class="role-badge">${escapeHtml(textOr(member.role, "Committee member"))}</span><strong>${escapeHtml(textOr(member.name, "Name pending"))}</strong><small>${escapeHtml(textOr(member.flat, "Flat not recorded"))}</small><div class="record-actions"><button data-edit-committee="${escapeHtml(member.id)}" type="button" aria-label="Edit ${escapeHtml(textOr(member.name, "committee member"))}" title="Edit committee member"><i class="fa-solid fa-pen" aria-hidden="true"></i></button><button class="danger-icon" data-delete-committee="${escapeHtml(member.id)}" data-committee-name="${escapeHtml(member.name)}" type="button" aria-label="Remove ${escapeHtml(textOr(member.name, "committee member"))}" title="Remove committee member"><i class="fa-solid fa-trash-can" aria-hidden="true"></i></button></div></article>`).join("") : empty("No committee members have been added.");
   const accessSearchQuery = String(byId("adminAccessSearch")?.value || "").trim().toLowerCase();
@@ -2592,6 +2591,8 @@ function populateEventEditor(event) {
   spocs.forEach((entry) => {
     const select = byId("adminSpocFields")?.querySelector(`[data-spoc-floor="${entry.floor}"]`);
     if (select) select.value = entry.flat;
+    const upiInput = byId("adminSpocFields")?.querySelector(`[data-spoc-upi="${entry.floor}"]`);
+    if (upiInput) upiInput.value = entry.upiId || "";
   });
 
   const titleHeading = byId("adminEventTitleHeading");
@@ -2628,7 +2629,11 @@ byId("adminEventForm").addEventListener("submit", async (event) => {
   const formData = new FormData(form);
   const eventId = String(formData.get("id") || "").trim();
   const contributionAmount = Math.max(1, Number(formData.get("contributionAmount") || 500));
-  const spocs = [...byId("adminSpocFields").querySelectorAll("[data-spoc-floor]")].map((select) => ({ floor: select.dataset.spocFloor, flat: select.value })).filter((entry) => entry.flat);
+  const spocs = [...byId("adminSpocFields").querySelectorAll("[data-spoc-floor]")].map((select) => {
+    const floor = select.dataset.spocFloor;
+    const upiInput = byId("adminSpocFields").querySelector(`[data-spoc-upi="${floor}"]`);
+    return { floor, flat: select.value, upiId: String(upiInput?.value || "").trim() };
+  }).filter((entry) => entry.flat);
   const expectedFloors = [...new Set(portalData.residents.map((resident) => String(resident.floor || "Unassigned")))];
   if (formData.get("status") === "Active" && spocs.length !== expectedFloors.length) { showToast("Assign one SPOC for every floor before activating this event.", "warning"); return; }
 
@@ -3507,6 +3512,15 @@ function getFloorSpocResident(eventObj, floorStr) {
   }) || null;
 }
 
+// The floor SPOC's UPI ID for the pay-QR, taken from the event's own SPOC assignment
+// (entered at event setup) — not from resident profiles.
+function getFloorSpocUpi(eventObj, floorStr) {
+  if (!eventObj || !floorStr) return "";
+  const spocs = Array.isArray(eventObj.spocs) ? eventObj.spocs : [];
+  const entry = spocs.find((s) => String(s.floor ?? "").trim() === String(floorStr).trim());
+  return entry ? String(entry.upiId || "").trim() : "";
+}
+
 function residentPhoneDigits(r) {
   return String(r?.ownerPrimaryPhone || r?.primaryPhone || r?.phone || r?.mobile || r?.ownerSecondaryPhone || r?.tenantPrimaryPhone || "").replace(/\D/g, "");
 }
@@ -3737,7 +3751,7 @@ document.addEventListener("click", async (event) => {
       floorStr,
       spocName,
       spocPhone: spocResident ? formatPhoneDisplay(residentPhoneDigits(spocResident)) : "",
-      spocUpi: spocResident ? String(spocResident.upiId || "").trim() : "",
+      spocUpi: getFloorSpocUpi(eventObj, floorStr),
       resName: cardModalBtn.dataset.resName,
       eventName: cardModalBtn.dataset.eventName,
       expectedAmount: Number(cardModalBtn.dataset.amount || 500),
