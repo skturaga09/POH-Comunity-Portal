@@ -9,6 +9,9 @@
     "deploy:prod": "firebase deploy --only hosting",
     "deploy:functions": "firebase deploy --only functions"
   },
+  "dependencies": {
+    "qrcode-generator": "^1.4.4"
+  },
   "devDependencies": {
     "esbuild": "^0.28.2"
   }

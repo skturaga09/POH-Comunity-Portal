@@ -1,4 +1,5 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js";
+import qrcode from "qrcode-generator";
 import { GoogleAuthProvider, getAuth, onAuthStateChanged, signInWithPopup, signOut, connectAuthEmulator } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js";
 import { getFunctions, httpsCallable, connectFunctionsEmulator } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-functions.js";
 import { collection, getDocs, getFirestore, connectFirestoreEmulator, query, orderBy, limit } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js";
@@ -818,6 +819,7 @@ function openResidentEditor(resident) {
   form.elements.parkingAllocation.value = resident.parkingAllocation || resident.parkingType || "";
   form.elements.parkingLevel.value = resident.parkingLevel || "";
   form.elements.parkingSlots.value = resident.parkingSlots || "";
+  if (form.elements.upiId) form.elements.upiId.value = resident.upiId || "";
   form.elements.ownerPhotoFile.value = "";
   byId("residentEditorFlatTitle").textContent = form.elements.flat.value;
   setResidentOwnerPhoto(resident.ownerPhotoUrl || resident.photoUrl || "");
@@ -3515,13 +3517,35 @@ function formatPhoneDisplay(digits) {
   return ten.length === 10 ? `+91 ${ten.slice(0, 5)} ${ten.slice(5)}` : (d ? `+${d}` : "");
 }
 
+// Draw a scannable UPI pay-QR (no amount, so the payer enters ₹500 or more) onto the
+// card canvas. Any UPI app (GPay, PhonePe, Paytm, bank apps) reads the same code.
+function drawUpiQr(ctx, upiId, payeeName, x, y, size) {
+  try {
+    const upiUrl = `upi://pay?pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(payeeName || "POH SPOC")}&cu=INR`;
+    const qr = qrcode(0, "M");
+    qr.addData(upiUrl);
+    qr.make();
+    const count = qr.getModuleCount();
+    const cell = size / count;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(x - 8, y - 8, size + 16, size + 16);
+    ctx.fillStyle = "#000000";
+    for (let r = 0; r < count; r++) {
+      for (let c = 0; c < count; c++) {
+        if (qr.isDark(r, c)) ctx.fillRect(x + Math.floor(c * cell), y + Math.floor(r * cell), Math.ceil(cell), Math.ceil(cell));
+      }
+    }
+  } catch (err) { console.error("UPI QR generation failed", err); }
+}
+
 function generateReminderCardImage(details) {
   const canvas = byId("reminderCardCanvas");
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
 
+  const hasQr = Boolean(details.spocUpi);
   const w = 540;
-  const h = 540;
+  const h = hasQr ? 740 : 540;
   canvas.width = w;
   canvas.height = h;
 
@@ -3601,23 +3625,37 @@ function generateReminderCardImage(details) {
     ctx.font = "bold 15px sans-serif";
     ctx.fillText("Status: Pending / Unpaid", w / 2, 440);
 
-    // Footer Divider & SPOC signature (name + phone)
+    // Scan & Pay QR — only when the SPOC has a UPI ID on file
+    if (hasQr) {
+      ctx.fillStyle = "#183e35";
+      ctx.font = "bold 14px 'Space Grotesk', sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Scan & Pay — any UPI app", w / 2, 486);
+      const qrSize = 132;
+      drawUpiQr(ctx, details.spocUpi, details.spocName, (w - qrSize) / 2, 498, qrSize);
+      ctx.fillStyle = "#5f6b62";
+      ctx.font = "12px sans-serif";
+      ctx.fillText(`UPI: ${details.spocUpi}`, w / 2, 652);
+    }
+
+    // Footer Divider & SPOC signature (name + phone), anchored to the card bottom
+    const footY = h - 74;
     ctx.strokeStyle = "#dce4dc";
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.moveTo(40, 464);
-    ctx.lineTo(w - 40, 464);
+    ctx.moveTo(40, footY);
+    ctx.lineTo(w - 40, footY);
     ctx.stroke();
 
     ctx.fillStyle = "#183e35";
     ctx.font = "bold 15px sans-serif";
     ctx.textAlign = "right";
     const spocDisplay = details.spocName ? `Floor ${details.floorStr} SPOC: ${details.spocName}` : `Floor ${details.floorStr} SPOC`;
-    ctx.fillText(spocDisplay, w - 45, 490);
+    ctx.fillText(spocDisplay, w - 45, footY + 26);
     if (details.spocPhone) {
       ctx.fillStyle = "#5f6b62";
       ctx.font = "bold 14px sans-serif";
-      ctx.fillText(details.spocPhone, w - 45, 510);
+      ctx.fillText(details.spocPhone, w - 45, footY + 46);
     }
     ctx.textAlign = "left";
 
@@ -3699,6 +3737,7 @@ document.addEventListener("click", async (event) => {
       floorStr,
       spocName,
       spocPhone: spocResident ? formatPhoneDisplay(residentPhoneDigits(spocResident)) : "",
+      spocUpi: spocResident ? String(spocResident.upiId || "").trim() : "",
       resName: cardModalBtn.dataset.resName,
       eventName: cardModalBtn.dataset.eventName,
       expectedAmount: Number(cardModalBtn.dataset.amount || 500),

@@ -902,7 +902,12 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
 
     const ownerPhotoUrl = String(payload.ownerPhotoUrl || "").trim();
     if (ownerPhotoUrl && !/^https:\/\//i.test(ownerPhotoUrl)) throw new HttpsError("invalid-argument", "The owner photo link is not valid.");
-    
+
+    // SPOC UPI ID (VPA) used to render the scan-to-pay QR on contribution reminder
+    // cards. Optional; preserved when the field isn't sent (e.g. vehicle-only saves).
+    const upiId = payload.upiId !== undefined ? String(payload.upiId || "").trim() : String(before.upiId || "").trim();
+    if (upiId && !/^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z][a-zA-Z0-9.\-_]{1,64}$/.test(upiId)) throw new HttpsError("invalid-argument", "Enter a valid UPI ID, e.g. name@okaxis.");
+
     const next = {
       flat,
       flatNo: flat,
@@ -924,6 +929,7 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
       ownerName: String(payload.ownerName || before.ownerName || before.name || "").trim(),
       phone: String(payload.ownerMobile || payload.phone || before.phone || before.ownerMobile || "").trim(),
       ownerMobile: String(payload.ownerMobile || payload.phone || before.ownerMobile || before.phone || "").trim(),
+      upiId,
       tenantName: String(payload.tenantName || "").trim(),
       tenantMobile: String(payload.tenantMobile || "").trim(),
       isOutstation: Boolean(payload.isOutstation),
