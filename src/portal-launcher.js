@@ -3495,36 +3495,6 @@ function getFloorSpocName(eventObj, floorStr) {
   return flatVal;
 }
 
-// Resolve the SPOC's own resident record for a floor, so the card can show their phone.
-// Mirrors getFloorSpocName: a SPOC entry may hold a flat NUMBER (look up by flat) or a
-// NAME (Apps Script import — look up by resident name). Previously it handled only the
-// flat-number case, so a name-stored SPOC showed a name but no phone.
-function getFloorSpocResident(eventObj, floorStr) {
-  if (!eventObj || !floorStr) return null;
-  const spocs = Array.isArray(eventObj.spocs) ? eventObj.spocs : [];
-  const spocEntry = spocs.find((s) => String(s.floor ?? "").trim() === String(floorStr).trim());
-  if (!spocEntry) return null;
-  const flatVal = String(spocEntry.flat || "").trim();
-  const isFlatNumber = flatVal && /^[A-Za-z]?\d+[A-Za-z]?$/.test(flatVal);
-  if (isFlatNumber) {
-    const norm = flatVal.replace(/^0+/, "").toUpperCase();
-    const byFlat = portalData.residents.find((r) => {
-      const rFlat = String(r.flat || "").trim().replace(/^0+/, "").toUpperCase();
-      const rFlatNo = String(r.flatNo || "").trim().replace(/^0+/, "").toUpperCase();
-      const rId = String(r.id || "").trim().replace(/^0+/, "").toUpperCase();
-      return rFlat === norm || rFlatNo === norm || rId === norm;
-    });
-    if (byFlat) return byFlat;
-  }
-  // Otherwise (or if no flat match) resolve by the SPOC's name — spocEntry.name, or a
-  // name stored directly in the flat field.
-  const nameVal = String(spocEntry.name || (isFlatNumber ? "" : flatVal)).trim().toLowerCase();
-  if (nameVal) {
-    return portalData.residents.find((r) => residentName(r).trim().toLowerCase() === nameVal) || null;
-  }
-  return null;
-}
-
 // The floor SPOC's UPI ID for the pay-QR, taken from the event's own SPOC assignment
 // (entered at event setup) — not from resident profiles.
 function getFloorSpocUpi(eventObj, floorStr) {
@@ -3532,24 +3502,6 @@ function getFloorSpocUpi(eventObj, floorStr) {
   const spocs = Array.isArray(eventObj.spocs) ? eventObj.spocs : [];
   const entry = spocs.find((s) => String(s.floor ?? "").trim() === String(floorStr).trim());
   return entry ? String(entry.upiId || "").trim() : "";
-}
-
-function residentPhoneDigits(r) {
-  const candidates = [r?.ownerPrimaryPhone, r?.ownerMobile, r?.primaryPhone, r?.phone, r?.mobile,
-                      r?.ownerSecondaryPhone, r?.tenantPrimaryPhone, r?.tenantMobile]
-    .map((v) => String(v || "").replace(/\D/g, "")).filter(Boolean);
-  // Prefer a well-formed mobile (10 digits, 12 starting 91, or 11 starting 0) over a
-  // partial/garbled field that merely happens to come first.
-  const valid = candidates.find((d) => d.length === 10 || (d.length === 12 && d.startsWith("91")) || (d.length === 11 && d.startsWith("0")));
-  return valid || candidates[0] || "";
-}
-
-function formatPhoneDisplay(digits) {
-  const d = String(digits || "").replace(/\D/g, "");
-  let ten = d;
-  if (d.length === 12 && d.startsWith("91")) ten = d.slice(2);
-  else if (d.length === 11 && d.startsWith("0")) ten = d.slice(1);
-  return ten.length === 10 ? `+91 ${ten.slice(0, 5)} ${ten.slice(5)}` : (d ? `+${d}` : "");
 }
 
 // Draw a scannable UPI pay-QR (no amount, so the payer enters ₹500 or more) onto the
@@ -3726,11 +3678,6 @@ function generateReminderCardImage(details) {
     ctx.textAlign = "right";
     const spocDisplay = details.spocName ? `Floor ${details.floorStr} SPOC: ${details.spocName}` : `Floor ${details.floorStr} SPOC`;
     ctx.fillText(spocDisplay, w - 45, footY + 26);
-    if (details.spocPhone) {
-      ctx.fillStyle = "#5f6b62";
-      ctx.font = "bold 14px sans-serif";
-      ctx.fillText(details.spocPhone, w - 45, footY + 46);
-    }
     ctx.textAlign = "left";
 
     const downloadLink = byId("downloadCardImgLink");
@@ -3805,12 +3752,10 @@ document.addEventListener("click", async (event) => {
     // Prefer the event matching the button's event-id; fall back to activeEvent()
     const eventObj = (eventId && portalData.events.find((e) => e.id === eventId)) || activeEvent();
     const spocName = getFloorSpocName(eventObj, floorStr);
-    const spocResident = getFloorSpocResident(eventObj, floorStr);
     const details = {
       flatStr: cardModalBtn.dataset.openCardModal,
       floorStr,
       spocName,
-      spocPhone: spocResident ? formatPhoneDisplay(residentPhoneDigits(spocResident)) : "",
       spocUpi: getFloorSpocUpi(eventObj, floorStr),
       resName: cardModalBtn.dataset.resName,
       eventName: cardModalBtn.dataset.eventName,
