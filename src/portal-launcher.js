@@ -3574,27 +3574,27 @@ function drawToran(ctx, y, w) {
   }
 }
 
-// A small lit diya (oil lamp) motif.
-function drawDiya(ctx, x, y) {
-  ctx.beginPath();
-  ctx.moveTo(x - 11, y);
-  ctx.quadraticCurveTo(x, y + 10, x + 11, y);
-  ctx.closePath();
-  ctx.fillStyle = "#b5732a"; ctx.fill();
-  ctx.beginPath(); ctx.moveTo(x - 11, y); ctx.lineTo(x + 11, y);
-  ctx.strokeStyle = "#8a561f"; ctx.lineWidth = 1.5; ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(x, y - 2);
-  ctx.quadraticCurveTo(x - 5, y - 9, x, y - 18);
-  ctx.quadraticCurveTo(x + 5, y - 9, x, y - 2);
-  ctx.closePath();
-  ctx.fillStyle = "#e8a83a"; ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(x, y - 4);
-  ctx.quadraticCurveTo(x - 2.5, y - 8, x, y - 13);
-  ctx.quadraticCurveTo(x + 2.5, y - 8, x, y - 4);
-  ctx.closePath();
-  ctx.fillStyle = "#f6d06a"; ctx.fill();
+// A small lotus flower — an auspicious, welcoming motif (petals fan up from the base).
+function drawLotus(ctx, cx, cy) {
+  const petal = (angle, len, wid, color) => {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(-wid, -len * 0.55, 0, -len);
+    ctx.quadraticCurveTo(wid, -len * 0.55, 0, 0);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.restore();
+  };
+  petal(-0.72, 13, 5.5, "#d98aa9");
+  petal(0.72, 13, 5.5, "#d98aa9");
+  petal(-0.36, 16, 6, "#e8a9c1");
+  petal(0.36, 16, 6, "#e8a9c1");
+  petal(0, 18, 6.5, "#f0bcd2");
+  ctx.beginPath(); ctx.ellipse(cx, cy, 9, 3.2, 0, 0, Math.PI * 2); ctx.fillStyle = "#2f7350"; ctx.fill();
 }
 
 function generateReminderCardImage(details) {
@@ -3666,8 +3666,8 @@ function generateReminderCardImage(details) {
     ctx.fillStyle = "#b5732a";
     ctx.font = "bold 20px 'Space Grotesk', sans-serif";
     ctx.fillText("Every contribution counts", w / 2, 384);
-    drawDiya(ctx, w / 2 - 192, 379);
-    drawDiya(ctx, w / 2 + 192, 379);
+    drawLotus(ctx, w / 2 - 185, 392);
+    drawLotus(ctx, w / 2 + 185, 392);
     ctx.fillStyle = "#2c4a3e";
     ctx.font = "14px sans-serif";
     ctx.fillText("Contribute any amount you wish — every rupee", w / 2, 412);
