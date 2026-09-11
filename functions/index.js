@@ -612,6 +612,17 @@ function residentEmails(r) {
   return RESIDENT_EMAIL_FIELDS.map((f) => String((r && r[f]) || "").trim().toLowerCase()).filter(Boolean);
 }
 
+// Normalize a contribution date from the client (a yyyy-mm-dd or ISO string) to an ISO
+// timestamp. Empty -> now. Rejects unparseable or clearly-future (>1 day skew) dates.
+function normalizeContributionDate(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return new Date().toISOString();
+  const d = new Date(raw);
+  if (Number.isNaN(d.valueOf())) throw new HttpsError("invalid-argument", "Enter a valid contribution date.");
+  if (d.getTime() > Date.now() + 24 * 60 * 60 * 1000) throw new HttpsError("invalid-argument", "Contribution date cannot be in the future.");
+  return d.toISOString();
+}
+
 async function resolveCallerFlat(caller) {
   const fromProfile = String(caller.profile?.flat || "").trim().toUpperCase();
   if (fromProfile) return fromProfile;
@@ -998,7 +1009,7 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     await assertCanManageContribution(caller, eventData, floor);
 
     const contributionRef = db.collection("events").doc(eventId).collection("contributions").doc();
-    await contributionRef.set({ id: contributionRef.id, eventId, floor, flat, name, amount, paymentMode, reference, status: "Received", date: new Date().toISOString(), createdAt: FIELD_VALUE.serverTimestamp(), recordedBy: caller.email });
+    await contributionRef.set({ id: contributionRef.id, eventId, floor, flat, name, amount, paymentMode, reference, status: "Received", date: normalizeContributionDate(payload.date), createdAt: FIELD_VALUE.serverTimestamp(), recordedBy: caller.email });
     await writeAudit("Recorded contribution", "Contribution", `${flat} · ${String(eventData.name || eventId)} · ₹${Math.round(amount)}`, caller);
     return { id: contributionRef.id, amount };
   }
@@ -1028,6 +1039,7 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
       updates.paymentMode = payload.paymentMode;
     }
     if (payload.reference !== undefined) updates.reference = String(payload.reference || "").trim();
+    if (payload.date !== undefined && String(payload.date).trim()) updates.date = normalizeContributionDate(payload.date);
     await ref.set(updates, { merge: true });
     await writeAudit("Edited contribution", "Contribution", `${before.flat} · ${String(eventData.name || eventId)} · ₹${Math.round(updates.amount ?? before.amount ?? 0)}`, caller);
     return { ok: true };

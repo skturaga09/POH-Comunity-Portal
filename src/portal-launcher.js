@@ -437,6 +437,7 @@ function prepareContributionForm() {
   byId("contributionFlat").disabled = true;
   byId("contributionOwner").value = "";
   byId("contributionSpoc").value = "";
+  if (form.elements.date) form.elements.date.value = toDateInputValue(new Date()); // default to today
   const hint = byId("contributionDuplicateWarning");
   if (hint) hint.hidden = true;
 }
@@ -459,6 +460,7 @@ function openContributionEditor(contribution) {
   form.elements.amount.value = Number(contribution.amount || 0) || "";
   form.elements.paymentMode.value = ["UPI", "Cash", "Bank Transfer"].includes(contribution.paymentMode) ? contribution.paymentMode : "UPI";
   if (form.elements.reference) form.elements.reference.value = contribution.reference || "";
+  if (form.elements.date) form.elements.date.value = toDateInputValue(contribution.date) || toDateInputValue(new Date());
   syncPaymentReferenceFields();
   populateContributionSpoc();
   const hint = byId("contributionDuplicateWarning");
@@ -1433,11 +1435,11 @@ function renderEventDashboard() {
       const canManage = canManageContribution(item.floor);
       const actions = canManage
         ? `<div style="display:flex;gap:6px;justify-content:flex-end;">
-             <button type="button" class="contrib-edit-btn" data-edit-contribution='${escapeHtml(JSON.stringify({ id: item.id, flat: item.flat, floor: item.floor, name: displayName, amount: item.amount, paymentMode: item.paymentMode, reference: item.reference || "" }))}' style="background:#e6efe9;color:#183e35;border:1px solid #c2d6c7;font-size:11px;font-weight:700;padding:4px 9px;border-radius:5px;cursor:pointer;white-space:nowrap;"><i class="fa-solid fa-pen-to-square"></i> Edit</button>
+             <button type="button" class="contrib-edit-btn" data-edit-contribution='${escapeHtml(JSON.stringify({ id: item.id, flat: item.flat, floor: item.floor, name: displayName, amount: item.amount, paymentMode: item.paymentMode, reference: item.reference || "", date: item.date || "" }))}' style="background:#e6efe9;color:#183e35;border:1px solid #c2d6c7;font-size:11px;font-weight:700;padding:4px 9px;border-radius:5px;cursor:pointer;white-space:nowrap;"><i class="fa-solid fa-pen-to-square"></i> Edit</button>
              <button type="button" class="contrib-delete-btn" data-delete-contribution="${escapeHtml(item.id || "")}" data-flat="${escapeHtml(flatStr)}" data-amount="${Number(item.amount || 0)}" style="background:#fdf0ed;color:#9c3f34;border:1px solid #f2c7c1;font-size:11px;font-weight:700;padding:4px 9px;border-radius:5px;cursor:pointer;white-space:nowrap;"><i class="fa-solid fa-trash"></i></button>
            </div>`
         : "";
-      return `<tr><td>${escapeHtml(textOr(item.flat, "—"))}</td><td>${escapeHtml(displayName)}</td><td><strong>${money(item.amount)}</strong></td><td>${escapeHtml(textOr(item.paymentMode, "—"))}</td><td style="text-align:right;">${actions}</td></tr>`;
+      return `<tr><td>${escapeHtml(textOr(item.flat, "—"))}</td><td>${escapeHtml(displayName)}</td><td><strong>${money(item.amount)}</strong></td><td>${escapeHtml(textOr(item.paymentMode, "—"))}</td><td>${escapeHtml(displayDate(item.date))}</td><td style="text-align:right;">${actions}</td></tr>`;
     })
     .join("") : "<tr><td class=\"empty-inline\" colspan=\"5\">No contributions recorded for this event yet.</td></tr>";
   renderExpenseHistory();
@@ -1450,6 +1452,15 @@ function renderEventDashboard() {
 function displayDate(value) {
   const date = value?.toDate ? value.toDate() : value ? new Date(value) : null;
   return date && !Number.isNaN(date.valueOf()) ? date.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "Date pending";
+}
+
+// Convert a stored date (ISO string / Firestore Timestamp) to a yyyy-mm-dd value for an
+// <input type="date">, using local calendar parts so it shows the same day the user sees.
+function toDateInputValue(value) {
+  const d = value?.toDate ? value.toDate() : value ? new Date(value) : null;
+  if (!d || Number.isNaN(d.valueOf())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 function renderExpenseHistory() {
@@ -1680,9 +1691,9 @@ async function saveContribution(event) {
   button.disabled = true; button.textContent = "Saving…";
   try {
     if (editingId) {
-      await adminConsoleCall({ action: "editContribution", payload: { eventId: event.id, contributionId: editingId, name: formData.get("name"), amount, paymentMode: formData.get("paymentMode"), reference: formData.get("reference") } });
+      await adminConsoleCall({ action: "editContribution", payload: { eventId: event.id, contributionId: editingId, name: formData.get("name"), amount, paymentMode: formData.get("paymentMode"), reference: formData.get("reference"), date: formData.get("date") } });
     } else {
-      await adminConsoleCall({ action: "recordContribution", payload: { eventId: event.id, name: formData.get("name"), floor: formData.get("floor"), flat, amount, paymentMode: formData.get("paymentMode"), reference: formData.get("reference") } });
+      await adminConsoleCall({ action: "recordContribution", payload: { eventId: event.id, name: formData.get("name"), floor: formData.get("floor"), flat, amount, paymentMode: formData.get("paymentMode"), reference: formData.get("reference"), date: formData.get("date") } });
     }
     delete form.dataset.editingContributionId;
     form.reset(); syncPaymentReferenceFields(); await refreshEventFinance(event.id); byId("contributionFormModal").close();
