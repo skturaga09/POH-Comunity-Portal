@@ -3496,14 +3496,13 @@ async function openTicketDetail(id) {
   }
 }
 function prepareTicketForm() {
-  const rec = (typeof getUserResidentRecord === "function") ? getUserResidentRecord() : null;
-  const flat = (rec && (rec.flat || rec.flatNo)) || approvedProfile?.flat || "";
-  const input = byId("ticketFlat"), note = byId("ticketFlatNote"), common = byId("ticketCommon");
-  if (input) input.value = flat || "";
-  if (note) note.innerHTML = flat ? '<i class="fa-solid fa-lock"></i> from your profile' : "not linked — use common-area if needed";
-  if (common) { common.checked = false; common.onchange = () => { if (input) input.value = common.checked ? "Common area" : (flat || ""); }; }
   byId("ticketForm")?.reset();
-  if (input) input.value = flat || "";
+  const rec = (typeof getUserResidentRecord === "function") ? getUserResidentRecord() : null;
+  const flat = String(approvedProfile?.flat || (rec && (rec.flat || rec.flatNo)) || "").trim();
+  const input = byId("ticketFlat"), note = byId("ticketFlatNote"), common = byId("ticketCommon");
+  if (input) { input.value = flat; input.placeholder = flat ? "" : "Not linked to a flat"; }
+  if (note) note.innerHTML = flat ? '<i class="fa-solid fa-lock" aria-hidden="true"></i> auto-filled from your login' : "For a shared-space issue, tick common-area below.";
+  if (common) { common.checked = false; common.onchange = () => { if (input) input.value = common.checked ? "Common area" : flat; }; }
 }
 async function submitTicket(e) {
   if (e) e.preventDefault();
