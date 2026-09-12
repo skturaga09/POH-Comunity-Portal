@@ -444,8 +444,16 @@ const ADMIN_ROLES = ["super_admin", "admin", "president"];
 const FINANCE_ROLES = [...ADMIN_ROLES, "treasurer", "committee"];
 const DIRECTORY_EDITOR_ROLES = [...ADMIN_ROLES, "committee"];
 const MODERATOR_ROLES = [...ADMIN_ROLES, "committee"];
-const USER_ROLES = ["resident", "committee", "treasurer", "president", "admin", "super_admin"];
+const USER_ROLES = ["resident", "committee", "treasurer", "president", "admin", "super_admin", "manager"];
 const FEEDBACK_TYPES = ["feature", "bug", "improvement"];
+
+// Complaints & Helpdesk ticketing. Managers (+ admins) triage; residents raise & track.
+const MANAGER_ROLES = [...ADMIN_ROLES, "manager"];
+const TICKET_CATEGORIES = ["Electrical", "Plumbing", "Housekeeping", "Carpentry", "Lift", "Security", "STP/Garden", "Common Area", "Other"];
+const TICKET_TEAMS = ["Electrician", "Plumber", "Housekeeping", "Carpenter", "Lift Technician", "Security", "Gardener/STP", "Civil", "Other"];
+const TICKET_PRIORITIES = ["Low", "Normal", "High", "Urgent"];
+const TICKET_STATUSES = ["Open", "Assigned", "In Progress", "Resolved", "Closed", "Reopened", "Cancelled"];
+const TICKET_OPEN_STATES = ["Open", "Assigned", "In Progress", "Reopened"];
 const FEEDBACK_AREAS = ["Directory", "Events", "Finance", "Parking", "Emergency", "Amenities", "Notices", "General"];
 const FEEDBACK_STATUSES = ["Open", "Under review", "Planned", "In progress", "Done", "Declined"];
 
@@ -2072,4 +2080,313 @@ exports.pohReadStats = onCall({ region: "asia-south1" }, async (request) => {
     await ref.set({ total: 0 }, { merge: true });
   }
   return { total };
+});
+
+// ============================================================================
+// Complaints & Helpdesk ticketing (ticketHub)
+// Residents raise complaints; they auto-land in the manager queue; the manager
+// assigns a team, updates status/comments, and closes; the resident rates it.
+// Ticket ids are POH-<FLAT>-NNNN (per-flat sequence); flat is derived from the
+// authed user, never trusted from the client. All state changes append to the
+// ticket timeline and fan out in-app notifications.
+// ============================================================================
+function ticketFlatKey(flat) {
+  const s = String(flat || "").toUpperCase().replace(/[^A-Z0-9]+/g, "");
+  return s || "COMMON";
+}
+
+async function nextTicketId(flatKey) {
+  const counterRef = db.collection("ticketCounters").doc(flatKey);
+  let seq = 1;
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(counterRef);
+    seq = Number(snap.data() && snap.data().seq || 0) + 1;
+    tx.set(counterRef, { seq, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  });
+  return `POH-${flatKey}-${String(seq).padStart(4, "0")}`;
+}
+
+async function ticketManagerEmails() {
+  const active = (docs) => docs.filter((d) => String(d.data().status || "").toLowerCase() === "active")
+    .map((d) => String(d.data().email || "").trim().toLowerCase()).filter(Boolean);
+  const managers = active((await db.collection("users").where("role", "==", "manager").get()).docs);
+  if (managers.length) return managers;
+  // No manager onboarded yet — fall back to admins so nothing is missed.
+  return active((await db.collection("users").where("role", "in", ADMIN_ROLES).get()).docs);
+}
+
+async function notifyRecipients(emails, note) {
+  const uniq = [...new Set((emails || []).map((e) => String(e || "").trim().toLowerCase()).filter(Boolean))];
+  if (!uniq.length) return;
+  const batch = db.batch();
+  uniq.forEach((email) => {
+    const ref = db.collection("notifications").doc();
+    batch.set(ref, { id: ref.id, recipientEmail: email, read: false, createdAt: admin.firestore.FieldValue.serverTimestamp(), ...note });
+  });
+  await batch.commit();
+}
+
+function ticketTimelineEntry(caller, action, detail) {
+  return { at: new Date().toISOString(), by: caller.email, byName: caller.profile.name || caller.email, byRole: caller.profile.role || "resident", action, detail: detail || "" };
+}
+
+function publicTicket(id, d, opts) {
+  return {
+    id,
+    flat: d.flat || "", floor: d.floor || "",
+    category: d.category || "Other", priority: d.priority || "Normal",
+    title: d.title || "", description: d.description || "",
+    status: d.status || "Open", team: d.team || "", assignee: d.assignee || "",
+    photoUrl: d.photoUrl || "",
+    raisedByName: d.raisedByName || "Resident", raisedByEmail: (opts && opts.reveal) ? (d.raisedByEmail || "") : "",
+    commentCount: Number(d.commentCount || 0),
+    feedback: d.feedback || null,
+    createdAt: d.createdAt || null, updatedAt: d.updatedAt || null,
+    assignedAt: d.assignedAt || null, resolvedAt: d.resolvedAt || null, closedAt: d.closedAt || null,
+    timeline: Array.isArray(d.timeline) ? d.timeline : []
+  };
+}
+
+exports.ticketHub = onCall({ region: "asia-south1" }, async (request) => {
+  ensureReadPatch();
+  const action = String(request.data?.action || "list");
+  const caller = await callerProfile(request);
+  ensureActive(caller.profile);
+  const payload = request.data?.payload || {};
+  const isManager = MANAGER_ROLES.includes(caller.profile.role);
+  const callerEmailLower = String(caller.email || "").trim().toLowerCase();
+
+  // ---- Resident: raise a complaint -----------------------------------------
+  if (action === "create") {
+    const category = String(payload.category || "").trim();
+    const priority = String(payload.priority || "Normal").trim();
+    const title = String(payload.title || "").trim();
+    const description = String(payload.description || "").trim();
+    const photoUrl = String(payload.photoUrl || "").trim();
+    const scopeCommon = payload.scope === "common";
+    if (!TICKET_CATEGORIES.includes(category)) throw new HttpsError("invalid-argument", "Choose a valid category.");
+    if (!TICKET_PRIORITIES.includes(priority)) throw new HttpsError("invalid-argument", "Choose a valid priority.");
+    if (title.length < 4 || title.length > 120) throw new HttpsError("invalid-argument", "The title must be between 4 and 120 characters.");
+    if (description.length < 5 || description.length > 2000) throw new HttpsError("invalid-argument", "Describe the issue in 5 to 2000 characters.");
+    if (photoUrl && !/^https:\/\//i.test(photoUrl)) throw new HttpsError("invalid-argument", "The photo link is not valid.");
+    const callerFlat = await resolveCallerFlat(caller);
+    const flat = scopeCommon ? "COMMON" : callerFlat;
+    if (!flat) throw new HttpsError("failed-precondition", "Your flat isn't linked to your profile yet — contact an administrator, or raise this as a common-area complaint.");
+    const flatKey = ticketFlatKey(flat);
+    const floor = flat === "COMMON" ? "Common" : String(flat).replace(/^0+/, "").charAt(0).toUpperCase();
+    const id = await nextTicketId(flatKey);
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    const ticket = {
+      id, flat: flat.toUpperCase(), floor, flatKey,
+      category, priority, title, description, photoUrl,
+      status: "Open", team: "", assignee: "",
+      raisedByEmail: caller.email, raisedByName: caller.profile.name || caller.email, raisedByUid: caller.uid,
+      commentCount: 0, feedback: null,
+      timeline: [ticketTimelineEntry(caller, "Raised", `${category} · ${priority}`)],
+      createdAt: now, updatedAt: now
+    };
+    await db.collection("tickets").doc(id).set(ticket);
+    await writeAudit("Raised complaint", "Ticket", `${id} · ${category} · ${title}`, caller);
+    await notifyRecipients(await ticketManagerEmails(), { type: "ticket_new", ticketId: id, title: `New complaint ${id}`, body: `${category} (${priority}) from ${ticket.flat}: ${title}` });
+    await notifyRecipients([caller.email], { type: "ticket_ack", ticketId: id, title: `Complaint ${id} raised`, body: `We've logged your ${category.toLowerCase()} complaint. You'll be notified as it progresses.` });
+    return { id };
+  }
+
+  // ---- List tickets (resident: own flat; manager/admin: all + filters) ------
+  if (action === "list") {
+    let query = db.collection("tickets");
+    if (isManager) {
+      if (payload.status && TICKET_STATUSES.includes(payload.status)) query = query.where("status", "==", payload.status);
+    } else {
+      const flat = ticketFlatKey(await resolveCallerFlat(caller));
+      query = query.where("flatKey", "==", flat);
+    }
+    const snap = await query.get();
+    const items = snap.docs
+      .map((doc) => publicTicket(doc.id, doc.data(), { reveal: isManager }))
+      .sort((a, b) => String(b.id).localeCompare(String(a.id)));
+    return { items, isManager, canManage: isManager };
+  }
+
+  // ---- Ticket detail + comments --------------------------------------------
+  if (action === "get") {
+    const id = String(payload.ticketId || "");
+    const snap = await db.collection("tickets").doc(id).get();
+    if (!snap.exists) throw new HttpsError("not-found", "Ticket not found.");
+    const d = snap.data();
+    const ownFlat = ticketFlatKey(await resolveCallerFlat(caller));
+    const isOwner = String(d.raisedByEmail || "").trim().toLowerCase() === callerEmailLower || d.flatKey === ownFlat;
+    if (!isManager && !isOwner) throw new HttpsError("permission-denied", "You can only view your own complaints.");
+    const commentsSnap = await db.collection("tickets").doc(id).collection("comments").orderBy("createdAt", "asc").get();
+    const comments = commentsSnap.docs
+      .map((c) => c.data())
+      .filter((c) => isManager || !c.internal)
+      .map((c) => ({ author: c.authorName || "User", role: c.authorRole || "", text: c.text || "", internal: Boolean(c.internal), createdAt: c.createdAt || null }));
+    return { ticket: publicTicket(id, d, { reveal: isManager }), comments, isManager, isOwner };
+  }
+
+  // ---- Manager: assign to a team -------------------------------------------
+  if (action === "assign") {
+    if (!isManager) throw new HttpsError("permission-denied", "Only the manager or an administrator can assign complaints.");
+    const id = String(payload.ticketId || "");
+    const team = String(payload.team || "").trim();
+    const assignee = String(payload.assignee || "").trim();
+    if (!TICKET_TEAMS.includes(team)) throw new HttpsError("invalid-argument", "Choose a valid team.");
+    const ref = db.collection("tickets").doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) throw new HttpsError("not-found", "Ticket not found.");
+    const d = snap.data();
+    await ref.set({
+      status: "Assigned", team, assignee,
+      assignedAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      timeline: admin.firestore.FieldValue.arrayUnion(ticketTimelineEntry(caller, "Assigned", `${team}${assignee ? " · " + assignee : ""}`))
+    }, { merge: true });
+    await writeAudit("Assigned complaint", "Ticket", `${id} · ${team}`, caller);
+    await notifyRecipients([d.raisedByEmail], { type: "ticket_update", ticketId: id, title: `${id} assigned`, body: `Your complaint has been assigned to ${team}. We'll update you as work progresses.` });
+    return { ok: true };
+  }
+
+  // ---- Manager: update status (In Progress / Resolved / Cancelled) ----------
+  if (action === "updateStatus") {
+    if (!isManager) throw new HttpsError("permission-denied", "Only the manager or an administrator can update complaints.");
+    const id = String(payload.ticketId || "");
+    const status = String(payload.status || "").trim();
+    if (!["In Progress", "Resolved", "Cancelled", "Assigned"].includes(status)) throw new HttpsError("invalid-argument", "Choose a valid status.");
+    const ref = db.collection("tickets").doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) throw new HttpsError("not-found", "Ticket not found.");
+    const d = snap.data();
+    const patch = { status, updatedAt: admin.firestore.FieldValue.serverTimestamp(), timeline: admin.firestore.FieldValue.arrayUnion(ticketTimelineEntry(caller, status, String(payload.note || ""))) };
+    if (status === "Resolved") patch.resolvedAt = admin.firestore.FieldValue.serverTimestamp();
+    await ref.set(patch, { merge: true });
+    await writeAudit("Updated complaint", "Ticket", `${id} · ${status}`, caller);
+    await notifyRecipients([d.raisedByEmail], { type: "ticket_update", ticketId: id, title: `${id} · ${status}`, body: `Your complaint status is now "${status}".` });
+    return { ok: true };
+  }
+
+  // ---- Comment (resident on own; manager anywhere, may be internal) ---------
+  if (action === "comment") {
+    const id = String(payload.ticketId || "");
+    const text = String(payload.text || "").trim();
+    const internal = isManager && (payload.internal === true || payload.internal === "true");
+    if (text.length < 1 || text.length > 2000) throw new HttpsError("invalid-argument", "Enter a comment (up to 2000 characters).");
+    const ref = db.collection("tickets").doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) throw new HttpsError("not-found", "Ticket not found.");
+    const d = snap.data();
+    const ownFlat = ticketFlatKey(await resolveCallerFlat(caller));
+    const isOwner = String(d.raisedByEmail || "").trim().toLowerCase() === callerEmailLower || d.flatKey === ownFlat;
+    if (!isManager && !isOwner) throw new HttpsError("permission-denied", "You can only comment on your own complaints.");
+    await ref.collection("comments").add({ authorEmail: caller.email, authorName: caller.profile.name || caller.email, authorRole: caller.profile.role || "resident", text, internal, createdAt: admin.firestore.FieldValue.serverTimestamp() });
+    await ref.set({ commentCount: admin.firestore.FieldValue.increment(1), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    await writeAudit("Commented on complaint", "Ticket", `${id}${internal ? " (internal)" : ""}`, caller);
+    if (isManager && !internal) await notifyRecipients([d.raisedByEmail], { type: "ticket_comment", ticketId: id, title: `New reply on ${id}`, body: text.slice(0, 140) });
+    else if (!isManager) await notifyRecipients(await ticketManagerEmails(), { type: "ticket_comment", ticketId: id, title: `New comment on ${id}`, body: `${d.flat}: ${text.slice(0, 140)}` });
+    return { ok: true };
+  }
+
+  // ---- Manager: close a resolved complaint ---------------------------------
+  if (action === "close") {
+    if (!isManager) throw new HttpsError("permission-denied", "Only the manager or an administrator can close complaints.");
+    const id = String(payload.ticketId || "");
+    const ref = db.collection("tickets").doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) throw new HttpsError("not-found", "Ticket not found.");
+    const d = snap.data();
+    await ref.set({ status: "Closed", closedAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp(), timeline: admin.firestore.FieldValue.arrayUnion(ticketTimelineEntry(caller, "Closed", String(payload.note || ""))) }, { merge: true });
+    await writeAudit("Closed complaint", "Ticket", id, caller);
+    await notifyRecipients([d.raisedByEmail], { type: "ticket_closed", ticketId: id, title: `${id} closed`, body: "Your complaint has been closed. Please share feedback on the service." });
+    return { ok: true };
+  }
+
+  // ---- Resident: reopen a closed complaint ---------------------------------
+  if (action === "reopen") {
+    const id = String(payload.ticketId || "");
+    const ref = db.collection("tickets").doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) throw new HttpsError("not-found", "Ticket not found.");
+    const d = snap.data();
+    const ownFlat = ticketFlatKey(await resolveCallerFlat(caller));
+    const isOwner = String(d.raisedByEmail || "").trim().toLowerCase() === callerEmailLower || d.flatKey === ownFlat;
+    if (!isManager && !isOwner) throw new HttpsError("permission-denied", "You can only reopen your own complaints.");
+    if (!["Closed", "Resolved", "Cancelled"].includes(String(d.status))) throw new HttpsError("failed-precondition", "This complaint is still active.");
+    await ref.set({ status: "Reopened", updatedAt: admin.firestore.FieldValue.serverTimestamp(), timeline: admin.firestore.FieldValue.arrayUnion(ticketTimelineEntry(caller, "Reopened", String(payload.reason || ""))) }, { merge: true });
+    await writeAudit("Reopened complaint", "Ticket", id, caller);
+    await notifyRecipients(await ticketManagerEmails(), { type: "ticket_update", ticketId: id, title: `${id} reopened`, body: `${d.flat} reopened this complaint.` });
+    return { ok: true };
+  }
+
+  // ---- Resident: feedback on a closed complaint ----------------------------
+  if (action === "feedback") {
+    const id = String(payload.ticketId || "");
+    const rating = Number(payload.rating || 0);
+    const comment = String(payload.comment || "").trim().slice(0, 1000);
+    if (!(rating >= 1 && rating <= 5)) throw new HttpsError("invalid-argument", "Rate the service from 1 to 5 stars.");
+    const ref = db.collection("tickets").doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) throw new HttpsError("not-found", "Ticket not found.");
+    const d = snap.data();
+    const ownFlat = ticketFlatKey(await resolveCallerFlat(caller));
+    const isOwner = String(d.raisedByEmail || "").trim().toLowerCase() === callerEmailLower || d.flatKey === ownFlat;
+    if (!isOwner) throw new HttpsError("permission-denied", "Only the resident who raised the complaint can rate it.");
+    if (String(d.status) !== "Closed") throw new HttpsError("failed-precondition", "You can rate a complaint once it is closed.");
+    await ref.set({ feedback: { rating, comment, byName: caller.profile.name || caller.email, submittedAt: admin.firestore.FieldValue.serverTimestamp() }, updatedAt: admin.firestore.FieldValue.serverTimestamp(), timeline: admin.firestore.FieldValue.arrayUnion(ticketTimelineEntry(caller, "Rated", `${rating}/5`)) }, { merge: true });
+    await writeAudit("Rated complaint", "Ticket", `${id} · ${rating}/5`, caller);
+    await notifyRecipients(await ticketManagerEmails(), { type: "ticket_feedback", ticketId: id, title: `Feedback on ${id}`, body: `${rating}/5${comment ? " — " + comment.slice(0, 120) : ""}` });
+    return { ok: true };
+  }
+
+  // ---- Dashboard stats (manager/admin/committee) ---------------------------
+  if (action === "stats") {
+    if (!isManager && !DIRECTORY_EDITOR_ROLES.includes(caller.profile.role)) throw new HttpsError("permission-denied", "Not permitted.");
+    const snap = await db.collection("tickets").get();
+    const byStatus = {}; const byCategory = {}; const byTeam = {};
+    let ratingSum = 0, ratingCount = 0, resolvedDurationSum = 0, resolvedDurationCount = 0;
+    const recentFeedback = [];
+    snap.docs.forEach((doc) => {
+      const d = doc.data();
+      byStatus[d.status || "Open"] = (byStatus[d.status || "Open"] || 0) + 1;
+      byCategory[d.category || "Other"] = (byCategory[d.category || "Other"] || 0) + 1;
+      if (d.team) byTeam[d.team] = (byTeam[d.team] || 0) + 1;
+      if (d.feedback && Number(d.feedback.rating)) { ratingSum += Number(d.feedback.rating); ratingCount++; if (recentFeedback.length < 10) recentFeedback.push({ id: doc.id, rating: Number(d.feedback.rating), comment: d.feedback.comment || "", byName: d.feedback.byName || "" }); }
+      if (d.createdAt && d.closedAt && d.createdAt.toMillis && d.closedAt.toMillis) { resolvedDurationSum += (d.closedAt.toMillis() - d.createdAt.toMillis()); resolvedDurationCount++; }
+    });
+    const total = snap.size;
+    const open = (byStatus["Open"] || 0) + (byStatus["Assigned"] || 0) + (byStatus["In Progress"] || 0) + (byStatus["Reopened"] || 0);
+    return {
+      total, open, resolved: byStatus["Resolved"] || 0, closed: byStatus["Closed"] || 0, cancelled: byStatus["Cancelled"] || 0,
+      byStatus, byCategory, byTeam,
+      avgRating: ratingCount ? ratingSum / ratingCount : 0, ratingCount,
+      avgResolutionHours: resolvedDurationCount ? (resolvedDurationSum / resolvedDurationCount) / 3600000 : 0,
+      recentFeedback
+    };
+  }
+
+  throw new HttpsError("invalid-argument", "Unknown ticket action.");
+});
+
+// ---- Notifications feed (in-app) -------------------------------------------
+exports.notificationHub = onCall({ region: "asia-south1" }, async (request) => {
+  ensureReadPatch();
+  const action = String(request.data?.action || "list");
+  const caller = await callerProfile(request);
+  ensureActive(caller.profile);
+  const email = String(caller.email || "").trim().toLowerCase();
+  if (action === "list") {
+    const snap = await db.collection("notifications").where("recipientEmail", "==", email).orderBy("createdAt", "desc").limit(40).get();
+    const items = snap.docs.map((d) => ({ id: d.id, type: d.data().type || "", ticketId: d.data().ticketId || "", title: d.data().title || "", body: d.data().body || "", read: Boolean(d.data().read), createdAt: d.data().createdAt || null }));
+    return { items, unread: items.filter((i) => !i.read).length };
+  }
+  if (action === "markRead") {
+    const ids = Array.isArray(request.data?.payload?.ids) ? request.data.payload.ids.map(String).slice(0, 50) : [];
+    const batch = db.batch();
+    for (const id of ids) {
+      const ref = db.collection("notifications").doc(id);
+      const snap = await ref.get();
+      if (snap.exists && String(snap.data().recipientEmail || "").toLowerCase() === email) batch.set(ref, { read: true }, { merge: true });
+    }
+    await batch.commit();
+    return { ok: true };
+  }
+  throw new HttpsError("invalid-argument", "Unknown notification action.");
 });

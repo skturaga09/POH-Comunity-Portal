@@ -100,6 +100,25 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Complaints & Helpdesk tickets (and their comments), the per-flat id counters,
+    // and in-app notifications are all served and mutated through the callable
+    // ticketHub / notificationHub endpoints — the server derives the flat, enforces
+    // roles, appends the timeline, and fans out notifications. No browser writes.
+    match /tickets/{ticketId} {
+      allow read, write: if false;
+      match /{sub=**} {
+        allow read, write: if false;
+      }
+    }
+
+    match /ticketCounters/{flatKey} {
+      allow read, write: if false;
+    }
+
+    match /notifications/{notificationId} {
+      allow read, write: if false;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }
