@@ -1561,6 +1561,7 @@ function activateRoute(route) {
   if (route === "directory") renderDirectory();
   if (route === "feedback") loadFeedback();
   if (route === "maintenance") renderHelpdesk();
+  if (route === "home") renderNotifications();
   if (route === "admin") renderAdmin();
   if (route === "eventDashboard") renderEventDashboard();
   if (route === "move" || route === "moveManagement") renderMoveManagement();
@@ -3562,6 +3563,25 @@ byId("helpdeskRefreshBtn")?.addEventListener("click", renderHelpdesk);
 byId("helpdeskFilter")?.addEventListener("change", renderHelpdesk);
 byId("helpdeskList")?.addEventListener("click", (e) => { const card = e.target.closest("[data-open-ticket]"); if (card) openTicketDetail(card.dataset.openTicket); });
 byId("ticketDetailBody")?.addEventListener("click", (e) => { const btn = e.target.closest("[data-ticket-action]"); if (btn) handleTicketAction(btn.dataset.ticketAction, btn); });
+// ---------- In-app notifications (home feed) ----------
+function notifTime(ts) { const s = ts && (ts._seconds != null ? ts._seconds : ts.seconds); return s ? new Date(s * 1000).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : ""; }
+async function renderNotifications() {
+  const card = byId("homeNotificationsCard");
+  if (!card) return;
+  try {
+    const { data } = await notificationHubCall({ action: "list" });
+    const items = data.items || [];
+    if (!items.length) { card.hidden = true; return; }
+    card.hidden = false;
+    const badge = byId("homeNotifUnread");
+    if (badge) { if (data.unread) { badge.textContent = data.unread + " new"; badge.style.display = "inline-block"; } else { badge.style.display = "none"; } }
+    byId("homeNotificationsList").innerHTML = items.map((n) => `<div data-notif-ticket="${escapeHtml(n.ticketId || "")}" style="cursor:${n.ticketId ? "pointer" : "default"};display:flex;gap:10px;align-items:flex-start;padding:10px;border-radius:8px;background:${n.read ? "#f6faf6" : "#fffdf6"};border:1px solid ${n.read ? "#eef1ee" : "#f0e0b8"};"><i class="fa-solid ${n.read ? "fa-circle-check" : "fa-bell"}" style="color:${n.read ? "#8b9a91" : "#d99a32"};margin-top:2px;" aria-hidden="true"></i><div style="flex:1;"><strong style="color:#183e35;font-size:13px;">${escapeHtml(n.title)}</strong><div style="font-size:13px;color:#43534d;">${escapeHtml(n.body)}</div><small style="color:#8b9a91;">${escapeHtml(notifTime(n.createdAt))}</small></div></div>`).join("");
+  } catch (e) { card.hidden = true; }
+}
+byId("markAllNotifsBtn")?.addEventListener("click", async () => {
+  try { const { data } = await notificationHubCall({ action: "list" }); const ids = (data.items || []).filter((i) => !i.read).map((i) => i.id); if (ids.length) await notificationHubCall({ action: "markRead", payload: { ids } }); renderNotifications(); } catch (e) {}
+});
+byId("homeNotificationsList")?.addEventListener("click", (e) => { const el = e.target.closest("[data-notif-ticket]"); const tid = el && el.dataset.notifTicket; if (tid) { activateRoute("maintenance"); setTimeout(() => openTicketDetail(tid), 80); } });
 
 let currentReminderCardDetails = null;
 
