@@ -123,6 +123,8 @@ let portalLoaderTimer = null;
 const portalAccessCall = (data) => httpsCallable(functions, "portalAccess")(data);
 const adminConsoleCall = (data) => httpsCallable(functions, "adminConsole")(data);
 const feedbackHubCall = (data) => httpsCallable(functions, "feedbackHub")(data);
+const ticketHubCall = (data) => httpsCallable(functions, "ticketHub")(data);
+const notificationHubCall = (data) => httpsCallable(functions, "notificationHub")(data);
 const generateEventReportCall = (data) => httpsCallable(functions, "generateEventReport")(data);
 
 function setProfileImage(id, photoUrl, displayName = "") {
@@ -1558,7 +1560,7 @@ function activateRoute(route) {
   byId("portal").classList.toggle("home-active", route === "home");
   if (route === "directory") renderDirectory();
   if (route === "feedback") loadFeedback();
-  if (route === "maintenance") renderMaintenancePreview();
+  if (route === "maintenance") renderHelpdesk();
   if (route === "admin") renderAdmin();
   if (route === "eventDashboard") renderEventDashboard();
   if (route === "move" || route === "moveManagement") renderMoveManagement();
@@ -3386,80 +3388,180 @@ byId("normalizeVehiclesBtn")?.addEventListener("click", async () => {
   finally { btn.disabled = false; endPortalWork(); }
 });
 
-// ---------- Complaints & Helpdesk (interactive PREVIEW — nothing is submitted) ----------
-let previewTickets = [];
-function getPreviewFlat() {
-  const rec = (typeof getUserResidentRecord === "function") ? getUserResidentRecord() : null;
-  const flat = (rec && (rec.flat || rec.flatNo)) || approvedProfile?.flat || "";
-  return String(flat || "").trim();
+// ---------- Complaints & Helpdesk (live ticketing) ----------
+let helpdeskState = { items: [], isManager: false };
+let helpdeskCurrentTicket = "";
+const TICKET_TEAM_OPTIONS = ["Electrician", "Plumber", "Housekeeping", "Carpenter", "Lift Technician", "Security", "Gardener/STP", "Civil", "Other"];
+
+function ticketStatusColor(status) {
+  const m = { Open: ["#eef4f0", "#4a5951"], Assigned: ["#fff3d7", "#8b6416"], "In Progress": ["#e0f0ea", "#1e684f"], Resolved: ["#dff3e4", "#1c7a3f"], Closed: ["#e8ece9", "#4a5951"], Reopened: ["#fdece8", "#9c3f34"], Cancelled: ["#eceff0", "#68736c"] };
+  return m[status] || m.Open;
 }
-function previewFlatId(flat) {
-  return String(flat || "FLAT").replace(/[^a-zA-Z0-9]/g, "").toUpperCase() || "FLAT";
-}
-function previewTicketCard(t) {
-  const catColors = { Electrical: ["#e7f0ff", "#2a55a5"], Plumbing: ["#fdecea", "#a33a2c"], Lift: ["#fbf1e0", "#a3722a"], Housekeeping: ["#e3f5ec", "#135938"], Security: ["#eef4ff", "#3355a5"], Carpentry: ["#f0e9df", "#7a5a2a"], "STP/Garden": ["#e6f3e6", "#2e6b2e"], Other: ["#eceff0", "#556"] };
-  const statusColors = { Open: ["#eef4f0", "#4a5951"], Assigned: ["#fff3d7", "#8b6416"], "In progress": ["#e0f0ea", "#1e684f"], Resolved: ["#dff3e4", "#1c7a3f"], Closed: ["#e8ece9", "#4a5951"] };
-  const [cb, cc] = catColors[t.category] || catColors.Other;
-  const [sb, sc] = statusColors[t.status] || statusColors.Open;
-  const footer = t.isNew
-    ? '<i class="fa-solid fa-circle-info" style="margin-right:4px;color:#d99a32;"></i>Preview — not submitted'
-    : escapeHtml(t.note || "");
-  return `<article style="border:1px solid #e2e8e1;border-radius:10px;padding:14px;${t.status === "Closed" ? "opacity:0.9;" : ""}">
+function ticketCard(t) {
+  const [sb, sc] = ticketStatusColor(t.status);
+  const chips = `<span class="category-chip">${escapeHtml(t.category)}</span> <span class="category-chip">${escapeHtml(t.priority)}</span> <span class="category-chip">${escapeHtml(t.flat)}</span>${t.team ? ` <span class="category-chip">${escapeHtml(t.team)}</span>` : ""}`;
+  const meta = helpdeskState.isManager ? `Raised by ${escapeHtml(t.raisedByName)}` : "";
+  return `<article data-open-ticket="${escapeHtml(t.id)}" style="cursor:pointer;border:1px solid #e2e8e1;border-radius:10px;padding:14px;">
     <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;"><strong style="color:#183e35;">${escapeHtml(t.id)}</strong><span class="role-badge" style="background:${sb};color:${sc};">${escapeHtml(t.status)}</span></div>
-    <div style="margin:6px 0;"><span class="role-badge" style="background:${cb};color:${cc};">${escapeHtml(t.category)}</span> <span class="category-chip">${escapeHtml(t.priority)}</span> <span class="category-chip">${escapeHtml(t.flat)}</span></div>
-    <p style="font-size:13px;color:#43534d;margin:4px 0;">${escapeHtml(t.description || "")}</p>
-    <small style="color:#68736c;">${footer}</small>
+    <div style="margin:6px 0;">${chips}</div>
+    <p style="font-size:13px;color:#43534d;margin:4px 0;font-weight:600;">${escapeHtml(t.title)}</p>
+    <small style="color:#68736c;">${meta}${meta && t.commentCount ? " · " : ""}${t.commentCount ? t.commentCount + " comment(s)" : ""}</small>
   </article>`;
 }
-function renderPreviewTickets() {
-  const list = byId("previewTicketsList");
-  if (!list) return;
-  const flat = getPreviewFlat() || "B-604";
-  const fid = previewFlatId(flat);
-  const seeds = [
-    { id: `POH-${fid}-0007`, status: "In progress", category: "Plumbing", priority: "High", flat, description: "Bathroom tap leaking continuously.", note: "Assigned: Suresh (Plumber) · Raised → Assigned → In progress" },
-    { id: `POH-${fid}-0005`, status: "Resolved", category: "Electrical", priority: "Medium", flat, description: "Corridor light not working.", note: "Resolved — you'll be able to rate the service once live." },
-    { id: "POH-COMMON-0002", status: "Closed", category: "Lift", priority: "Urgent", flat: "Common area", description: "Tower B lift stopped at 3rd floor.", note: "Closed · rated 5/5" }
-  ];
-  list.innerHTML = [...previewTickets, ...seeds].map(previewTicketCard).join("");
+async function renderHelpdeskStats() {
+  const box = byId("helpdeskStats");
+  if (!box) return;
+  try {
+    const { data } = await ticketHubCall({ action: "stats" });
+    const tile = (label, val, color) => `<div style="background:#f6faf6;border-radius:10px;padding:12px 14px;text-align:center;"><div style="font-size:22px;font-weight:800;color:${color};">${val}</div><div style="font-size:12px;color:#68736c;">${label}</div></div>`;
+    box.innerHTML = tile("Open", data.open, "#8b6416") + tile("Resolved", data.resolved, "#1c7a3f") + tile("Closed", data.closed, "#4a5951") + tile("Total", data.total, "#183e35") + tile("Avg rating", data.ratingCount ? data.avgRating.toFixed(1) + "★" : "—", "#d99a32");
+    box.hidden = false;
+  } catch (e) { box.hidden = true; }
 }
-function renderMaintenancePreview() {
-  const flatInput = byId("ticketPreviewFlat");
-  if (flatInput) {
-    const flat = getPreviewFlat();
-    if (flat) {
-      // Flat is captured from the resident's profile at login — lock it.
-      flatInput.value = flat;
-      flatInput.readOnly = true;
-      flatInput.style.background = "#f2f5f1";
-      flatInput.style.cursor = "not-allowed";
-      flatInput.title = "Automatically set from your resident profile";
+async function renderHelpdesk() {
+  const list = byId("helpdeskList");
+  if (!list) return;
+  const status = byId("helpdeskFilter") ? byId("helpdeskFilter").value : "";
+  list.innerHTML = '<div class="poh-skel-card"><div class="poh-skel" style="height:15px;width:55%"></div><div class="poh-skel" style="height:12px;width:88%"></div></div>';
+  try {
+    const { data } = await ticketHubCall({ action: "list", payload: status ? { status } : {} });
+    helpdeskState = { items: data.items || [], isManager: Boolean(data.isManager) };
+    if (byId("helpdeskRoleBadge")) byId("helpdeskRoleBadge").textContent = helpdeskState.isManager ? "Manager queue" : "My complaints";
+    if (helpdeskState.isManager) renderHelpdeskStats(); else if (byId("helpdeskStats")) byId("helpdeskStats").hidden = true;
+    list.innerHTML = helpdeskState.items.length ? helpdeskState.items.map(ticketCard).join("") : empty("No complaints yet. Tap “Raise a complaint” to report an issue.");
+  } catch (e) {
+    list.innerHTML = empty(e && e.message ? e.message : "Could not load complaints.");
+  }
+}
+function ticketTimelineHtml(timeline) {
+  if (!Array.isArray(timeline) || !timeline.length) return "";
+  const rows = timeline.map((ev) => {
+    const when = ev.at ? new Date(ev.at).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "";
+    return `<li style="margin-bottom:8px;"><strong style="color:#183e35;">${escapeHtml(ev.action || "")}</strong>${ev.detail ? " — " + escapeHtml(ev.detail) : ""}<br><small style="color:#8b9a91;">${escapeHtml(ev.byName || "")} · ${escapeHtml(when)}</small></li>`;
+  }).join("");
+  return `<ol style="list-style:none;padding-left:0;margin:6px 0 0;border-left:2px solid #e2e8e1;padding-left:12px;">${rows}</ol>`;
+}
+function renderTicketDetail(data) {
+  const t = data.ticket, comments = data.comments || [], isManager = data.isManager, isOwner = data.isOwner;
+  helpdeskCurrentTicket = t.id;
+  const [sb, sc] = ticketStatusColor(t.status);
+  const active = ["Open", "Assigned", "In Progress", "Reopened"].includes(t.status);
+  let html = `<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;"><strong style="color:#183e35;font-size:16px;">${escapeHtml(t.id)}</strong><span class="role-badge" style="background:${sb};color:${sc};">${escapeHtml(t.status)}</span></div>`;
+  html += `<div style="margin-bottom:8px;"><span class="category-chip">${escapeHtml(t.category)}</span> <span class="category-chip">${escapeHtml(t.priority)}</span> <span class="category-chip">${escapeHtml(t.flat)}</span>${t.team ? ` <span class="category-chip">Team: ${escapeHtml(t.team)}${t.assignee ? " · " + escapeHtml(t.assignee) : ""}</span>` : ""}</div>`;
+  html += `<h3 style="margin:6px 0;">${escapeHtml(t.title)}</h3><p style="color:#43534d;white-space:pre-wrap;">${escapeHtml(t.description)}</p>`;
+  if (t.photoUrl) html += `<a href="${escapeHtml(t.photoUrl)}" target="_blank" rel="noopener" style="color:#1e684f;font-weight:700;">View attached photo</a>`;
+  if (isManager) html += `<p style="font-size:12px;color:#8b9a91;margin-top:4px;">Raised by ${escapeHtml(t.raisedByName)}${t.raisedByEmail ? " · " + escapeHtml(t.raisedByEmail) : ""}</p>`;
+
+  // Manager actions
+  if (isManager && active) {
+    const teamOpts = TICKET_TEAM_OPTIONS.map((tm) => `<option${t.team === tm ? " selected" : ""}>${escapeHtml(tm)}</option>`).join("");
+    html += `<div style="background:#f6faf6;border-radius:10px;padding:12px;margin-top:14px;"><p class="eyebrow">Manager actions</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0;"><select id="ticketAssignTeam" style="padding:8px;border:1px solid #d9ddd3;border-radius:6px;">${teamOpts}</select><input id="ticketAssignee" placeholder="Assignee (optional)" value="${escapeHtml(t.assignee || "")}" style="padding:8px;border:1px solid #d9ddd3;border-radius:6px;"><button class="primary-button" data-ticket-action="assign" type="button"><i class="fa-solid fa-user-gear"></i> Assign</button></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;"><button class="text-button" data-ticket-action="status" data-value="In Progress" type="button">Mark In Progress</button><button class="text-button" data-ticket-action="status" data-value="Resolved" type="button">Mark Resolved</button><button class="primary-button" data-ticket-action="close" type="button" style="background:#183e35;"><i class="fa-solid fa-lock"></i> Close</button></div></div>`;
+  } else if (isManager && t.status === "Resolved") {
+    html += `<div style="margin-top:12px;"><button class="primary-button" data-ticket-action="close" type="button" style="background:#183e35;"><i class="fa-solid fa-lock"></i> Close ticket</button></div>`;
+  }
+
+  // Timeline
+  html += `<div style="margin-top:16px;"><p class="eyebrow">Timeline</p>${ticketTimelineHtml(t.timeline)}</div>`;
+
+  // Comments
+  html += `<div style="margin-top:16px;"><p class="eyebrow">Comments</p>`;
+  html += comments.length ? comments.map((c) => `<div style="border-left:3px solid ${c.internal ? "#d99a32" : "#c2d6c7"};padding:6px 10px;margin-bottom:8px;background:${c.internal ? "#fffdf6" : "#f6faf6"};border-radius:0 6px 6px 0;"><strong style="color:#183e35;font-size:13px;">${escapeHtml(c.author)}</strong>${c.internal ? ' <span style="color:#8b6416;font-size:11px;font-weight:700;">(internal)</span>' : ""}<div style="font-size:13px;color:#43534d;white-space:pre-wrap;">${escapeHtml(c.text)}</div></div>`).join("") : '<p style="color:#8b9a91;font-size:13px;">No comments yet.</p>';
+  html += `<textarea id="ticketCommentBox" rows="2" placeholder="Add a comment…" style="width:100%;padding:8px;border:1px solid #d9ddd3;border-radius:6px;margin-top:6px;"></textarea><div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap;">${isManager ? '<label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" id="ticketCommentInternal"> internal (manager only)</label>' : ""}<button class="primary-button" data-ticket-action="comment" type="button"><i class="fa-solid fa-paper-plane"></i> Post</button></div></div>`;
+
+  // Resident: feedback + reopen
+  if (isOwner && t.status === "Closed") {
+    if (t.feedback) {
+      html += `<div style="margin-top:16px;background:#f0f7f4;border-radius:10px;padding:12px;"><p class="eyebrow">Your feedback</p><div>${"★".repeat(t.feedback.rating)}<span style="color:#d9ddd3;">${"★".repeat(5 - t.feedback.rating)}</span></div>${t.feedback.comment ? `<p style="font-size:13px;color:#43534d;">${escapeHtml(t.feedback.comment)}</p>` : ""}</div>`;
     } else {
-      // Fallback only if we couldn't determine the flat — keep it editable.
-      flatInput.readOnly = false;
-      flatInput.style.background = "";
-      flatInput.style.cursor = "";
-      flatInput.placeholder = "Enter your flat number";
+      html += `<div style="margin-top:16px;background:#f0f7f4;border-radius:10px;padding:12px;"><p class="eyebrow">Rate the service</p><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><select id="ticketRating" style="padding:8px;border:1px solid #d9ddd3;border-radius:6px;"><option value="5">5 ★ Excellent</option><option value="4">4 ★ Good</option><option value="3">3 ★ Okay</option><option value="2">2 ★ Poor</option><option value="1">1 ★ Very poor</option></select><input id="ticketFeedbackComment" placeholder="Optional comment" style="padding:8px;border:1px solid #d9ddd3;border-radius:6px;flex:1;min-width:160px;"><button class="primary-button" data-ticket-action="feedback" type="button"><i class="fa-solid fa-star"></i> Submit</button></div></div>`;
     }
   }
-  renderPreviewTickets();
+  if (isOwner && ["Closed", "Resolved", "Cancelled"].includes(t.status)) {
+    html += `<div style="margin-top:12px;text-align:right;"><button class="text-button" data-ticket-action="reopen" type="button"><i class="fa-solid fa-rotate-left"></i> Reopen this complaint</button></div>`;
+  }
+  byId("ticketDetailBody").innerHTML = html;
 }
-function createPreviewTicket() {
-  const form = byId("ticketPreviewForm");
-  if (!form) return;
+async function openTicketDetail(id) {
+  if (byId("ticketDetailTitle")) byId("ticketDetailTitle").textContent = id;
+  byId("ticketDetailBody").innerHTML = "<p style=\"color:#68736c;\">Loading…</p>";
+  byId("ticketDetailModal").showModal();
+  try {
+    const { data } = await ticketHubCall({ action: "get", payload: { ticketId: id } });
+    renderTicketDetail(data);
+  } catch (e) {
+    byId("ticketDetailBody").innerHTML = `<p style="color:#9c3f34;">${escapeHtml(e && e.message ? e.message : "Could not load complaint.")}</p>`;
+  }
+}
+function prepareTicketForm() {
+  const rec = (typeof getUserResidentRecord === "function") ? getUserResidentRecord() : null;
+  const flat = (rec && (rec.flat || rec.flatNo)) || approvedProfile?.flat || "";
+  const input = byId("ticketFlat"), note = byId("ticketFlatNote"), common = byId("ticketCommon");
+  if (input) input.value = flat || "";
+  if (note) note.innerHTML = flat ? '<i class="fa-solid fa-lock"></i> from your profile' : "not linked — use common-area if needed";
+  if (common) { common.checked = false; common.onchange = () => { if (input) input.value = common.checked ? "Common area" : (flat || ""); }; }
+  byId("ticketForm")?.reset();
+  if (input) input.value = flat || "";
+}
+async function submitTicket(e) {
+  if (e) e.preventDefault();
+  const form = byId("ticketForm");
   const fd = new FormData(form);
-  const flat = String(fd.get("flat") || getPreviewFlat() || "B-604").trim() || "B-604";
   const title = String(fd.get("title") || "").trim();
-  if (!title) { showToast("Add a short title to preview your ticket.", "warning"); return; }
-  const description = String(fd.get("description") || "").trim() || title;
-  const seq = String(8 + previewTickets.length).padStart(4, "0");
-  const id = `POH-${previewFlatId(flat)}-${seq}`;
-  previewTickets.unshift({ id, status: "Open", category: String(fd.get("category") || "Other"), priority: String(fd.get("priority") || "Medium"), flat, description, isNew: true });
-  renderPreviewTickets();
-  showToast(`Preview ticket ${id} created — this is a demo; it was not submitted or sent to anyone.`, "success");
+  const description = String(fd.get("description") || "").trim();
+  if (title.length < 4) { showToast("Add a short title (min 4 characters).", "warning"); return; }
+  if (description.length < 5) { showToast("Describe the issue (min 5 characters).", "warning"); return; }
+  const btn = byId("ticketSubmitBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "Submitting…"; }
+  beginPortalWork("Raising your complaint…");
+  try {
+    const payload = { category: String(fd.get("category") || ""), priority: String(fd.get("priority") || "Normal"), title, description, scope: byId("ticketCommon")?.checked ? "common" : "flat" };
+    const { data } = await ticketHubCall({ action: "create", payload });
+    byId("ticketFormModal").close();
+    showToast(`Complaint ${data.id} raised. You'll be notified as it progresses.`, "success");
+    await renderHelpdesk();
+    openTicketDetail(data.id);
+  } catch (err) {
+    showToast(err && err.message ? err.message : "Could not raise the complaint.", "error");
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane" style="margin-right:6px;"></i>Submit complaint'; }
+    endPortalWork();
+  }
 }
-byId("ticketPreviewForm")?.addEventListener("submit", (e) => { e.preventDefault(); createPreviewTicket(); });
-byId("ticketPreviewCreateBtn")?.addEventListener("click", createPreviewTicket);
+async function handleTicketAction(action, el) {
+  const id = helpdeskCurrentTicket;
+  if (!id) return;
+  try {
+    beginPortalWork("Updating…");
+    if (action === "assign") {
+      await ticketHubCall({ action: "assign", payload: { ticketId: id, team: byId("ticketAssignTeam")?.value || "", assignee: byId("ticketAssignee")?.value || "" } });
+    } else if (action === "status") {
+      await ticketHubCall({ action: "updateStatus", payload: { ticketId: id, status: el.dataset.value } });
+    } else if (action === "close") {
+      await ticketHubCall({ action: "close", payload: { ticketId: id } });
+    } else if (action === "reopen") {
+      await ticketHubCall({ action: "reopen", payload: { ticketId: id } });
+    } else if (action === "comment") {
+      const text = byId("ticketCommentBox")?.value || "";
+      if (!text.trim()) { showToast("Enter a comment first.", "warning"); endPortalWork(); return; }
+      await ticketHubCall({ action: "comment", payload: { ticketId: id, text, internal: byId("ticketCommentInternal")?.checked || false } });
+    } else if (action === "feedback") {
+      await ticketHubCall({ action: "feedback", payload: { ticketId: id, rating: Number(byId("ticketRating")?.value || 0), comment: byId("ticketFeedbackComment")?.value || "" } });
+      showToast("Thanks for your feedback!", "success");
+    }
+    await openTicketDetail(id);
+    renderHelpdesk();
+  } catch (err) {
+    showToast(err && err.message ? err.message : "Action failed.", "error");
+  } finally { endPortalWork(); }
+}
+byId("openTicketFormBtn")?.addEventListener("click", () => { prepareTicketForm(); byId("ticketFormModal").showModal(); });
+byId("ticketForm")?.addEventListener("submit", submitTicket);
+byId("helpdeskRefreshBtn")?.addEventListener("click", renderHelpdesk);
+byId("helpdeskFilter")?.addEventListener("change", renderHelpdesk);
+byId("helpdeskList")?.addEventListener("click", (e) => { const card = e.target.closest("[data-open-ticket]"); if (card) openTicketDetail(card.dataset.openTicket); });
+byId("ticketDetailBody")?.addEventListener("click", (e) => { const btn = e.target.closest("[data-ticket-action]"); if (btn) handleTicketAction(btn.dataset.ticketAction, btn); });
 
 let currentReminderCardDetails = null;
 
