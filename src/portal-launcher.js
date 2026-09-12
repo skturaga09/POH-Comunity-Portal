@@ -55,6 +55,7 @@ const roleLabel = (role) => String(role || "resident").replace(/_/g, " ");
 const safeUrl = (value) => /^https:\/\//i.test(String(value || "")) ? String(value) : "";
 const financeRoles = new Set(["super_admin", "admin", "president", "treasurer"]);
 const adminRoles = new Set(["super_admin", "admin", "president"]);
+const ticketManagerRoles = new Set(["super_admin", "admin", "president", "manager"]);
 const directoryEditorRoles = new Set(["super_admin", "admin", "president", "committee"]);
 
 const app = initializeApp(window.POH_FIREBASE_CONFIG);
@@ -3499,10 +3500,17 @@ function prepareTicketForm() {
   byId("ticketForm")?.reset();
   const rec = (typeof getUserResidentRecord === "function") ? getUserResidentRecord() : null;
   const flat = String(approvedProfile?.flat || (rec && (rec.flat || rec.flatNo)) || "").trim();
-  const input = byId("ticketFlat"), note = byId("ticketFlatNote"), common = byId("ticketCommon");
-  if (input) { input.value = flat; input.placeholder = flat ? "" : "Not linked to a flat"; }
-  if (note) note.innerHTML = flat ? '<i class="fa-solid fa-lock" aria-hidden="true"></i> auto-filled from your login' : "For a shared-space issue, tick common-area below.";
-  if (common) { common.checked = false; common.onchange = () => { if (input) input.value = common.checked ? "Common area" : flat; }; }
+  const managerMode = ticketManagerRoles.has(approvedProfile?.role);
+  const input = byId("ticketFlat"), note = byId("ticketFlatNote"), common = byId("ticketCommon"), list = byId("ticketFlatList");
+  if (managerMode) {
+    if (list) list.innerHTML = (portalData.residents || []).map((r) => { const f = String(r.flat || r.flatNo || "").trim(); const nm = residentName(r); return f ? `<option value="${escapeHtml(f)}">${escapeHtml(f)}${nm ? " · " + escapeHtml(nm) : ""}</option>` : ""; }).join("");
+    if (input) { input.readOnly = false; input.value = ""; input.placeholder = "Type or pick the resident's flat (e.g. B604)"; input.setAttribute("list", "ticketFlatList"); }
+    if (note) note.innerHTML = '<i class="fa-solid fa-user-gear" aria-hidden="true"></i> raising on behalf — pick the flat (or tick common-area)';
+  } else {
+    if (input) { input.readOnly = true; input.removeAttribute("list"); input.value = flat; input.placeholder = flat ? "" : "Not linked to a flat"; }
+    if (note) note.innerHTML = flat ? '<i class="fa-solid fa-lock" aria-hidden="true"></i> auto-filled from your login' : "For a shared-space issue, tick common-area below.";
+  }
+  if (common) { common.checked = false; common.onchange = () => { if (!input) return; if (common.checked) { input.value = "Common area"; input.readOnly = true; } else { input.value = managerMode ? "" : flat; input.readOnly = !managerMode; } }; }
 }
 async function submitTicket(e) {
   if (e) e.preventDefault();
@@ -3516,7 +3524,12 @@ async function submitTicket(e) {
   if (btn) { btn.disabled = true; btn.textContent = "Submitting…"; }
   beginPortalWork("Raising your complaint…");
   try {
-    const payload = { category: String(fd.get("category") || ""), priority: String(fd.get("priority") || "Normal"), title, description, scope: byId("ticketCommon")?.checked ? "common" : "flat" };
+    const isCommon = byId("ticketCommon")?.checked;
+    const payload = { category: String(fd.get("category") || ""), priority: String(fd.get("priority") || "Normal"), title, description, scope: isCommon ? "common" : "flat" };
+    if (ticketManagerRoles.has(approvedProfile?.role) && !isCommon) {
+      payload.onBehalfFlat = String(byId("ticketFlat")?.value || "").trim();
+      if (!payload.onBehalfFlat) { showToast("Pick the resident's flat (or tick common-area).", "warning"); if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane" style="margin-right:6px;"></i>Submit complaint'; } endPortalWork(); return; }
+    }
     const { data } = await ticketHubCall({ action: "create", payload });
     byId("ticketFormModal").close();
     showToast(`Complaint ${data.id} raised. You'll be notified as it progresses.`, "success");

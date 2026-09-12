@@ -2115,6 +2115,15 @@ async function ticketManagerEmails() {
   return active((await db.collection("users").where("role", "in", ADMIN_ROLES).get()).docs);
 }
 
+async function flatOwnerEmail(flat) {
+  const key = ticketFlatKey(flat);
+  const snap = await db.collection("residents").get();
+  const doc = snap.docs.find((d) => ticketFlatKey(d.data().flat || d.id) === key);
+  if (!doc) return "";
+  const emails = residentEmails(doc.data());
+  return emails[0] || "";
+}
+
 async function notifyRecipients(emails, note) {
   const uniq = [...new Set((emails || []).map((e) => String(e || "").trim().toLowerCase()).filter(Boolean))];
   if (!uniq.length) return;
@@ -2169,9 +2178,12 @@ exports.ticketHub = onCall({ region: "asia-south1" }, async (request) => {
     if (title.length < 4 || title.length > 120) throw new HttpsError("invalid-argument", "The title must be between 4 and 120 characters.");
     if (description.length < 5 || description.length > 2000) throw new HttpsError("invalid-argument", "Describe the issue in 5 to 2000 characters.");
     if (photoUrl && !/^https:\/\//i.test(photoUrl)) throw new HttpsError("invalid-argument", "The photo link is not valid.");
-    const callerFlat = await resolveCallerFlat(caller);
-    const flat = scopeCommon ? "COMMON" : callerFlat;
+    let flat, residentEmail;
+    if (scopeCommon) { flat = "COMMON"; residentEmail = ""; }
+    else if (isManager && String(payload.onBehalfFlat || "").trim()) { flat = String(payload.onBehalfFlat).trim(); residentEmail = await flatOwnerEmail(flat); }
+    else { flat = await resolveCallerFlat(caller); residentEmail = caller.email; }
     if (!flat) throw new HttpsError("failed-precondition", "Your flat isn't linked to your profile yet — contact an administrator, or raise this as a common-area complaint.");
+    const onBehalf = Boolean(isManager && String(payload.onBehalfFlat || "").trim() && !scopeCommon);
     const flatKey = ticketFlatKey(flat);
     const floor = flat === "COMMON" ? "Common" : String(flat).replace(/^0+/, "").charAt(0).toUpperCase();
     const id = await nextTicketId(flatKey);
@@ -2181,14 +2193,15 @@ exports.ticketHub = onCall({ region: "asia-south1" }, async (request) => {
       category, priority, title, description, photoUrl,
       status: "Open", team: "", assignee: "",
       raisedByEmail: caller.email, raisedByName: caller.profile.name || caller.email, raisedByUid: caller.uid,
+      residentEmail: String(residentEmail || "").trim().toLowerCase(), onBehalf,
       commentCount: 0, feedback: null,
-      timeline: [ticketTimelineEntry(caller, "Raised", `${category} · ${priority}`)],
+      timeline: [ticketTimelineEntry(caller, "Raised", onBehalf ? `On behalf of ${flat.toUpperCase()} · ${category} · ${priority}` : `${category} · ${priority}`)],
       createdAt: now, updatedAt: now
     };
     await db.collection("tickets").doc(id).set(ticket);
     await writeAudit("Raised complaint", "Ticket", `${id} · ${category} · ${title}`, caller);
     await notifyRecipients(await ticketManagerEmails(), { type: "ticket_new", ticketId: id, title: `New complaint ${id}`, body: `${category} (${priority}) from ${ticket.flat}: ${title}` });
-    await notifyRecipients([caller.email], { type: "ticket_ack", ticketId: id, title: `Complaint ${id} raised`, body: `We've logged your ${category.toLowerCase()} complaint. You'll be notified as it progresses.` });
+    await notifyRecipients([caller.email, residentEmail], { type: "ticket_ack", ticketId: id, title: `Complaint ${id} raised`, body: `We've logged your ${category.toLowerCase()} complaint. You'll be notified as it progresses.` });
     return { id };
   }
 
@@ -2242,7 +2255,7 @@ exports.ticketHub = onCall({ region: "asia-south1" }, async (request) => {
       timeline: admin.firestore.FieldValue.arrayUnion(ticketTimelineEntry(caller, "Assigned", `${team}${assignee ? " · " + assignee : ""}`))
     }, { merge: true });
     await writeAudit("Assigned complaint", "Ticket", `${id} · ${team}`, caller);
-    await notifyRecipients([d.raisedByEmail], { type: "ticket_update", ticketId: id, title: `${id} assigned`, body: `Your complaint has been assigned to ${team}. We'll update you as work progresses.` });
+    await notifyRecipients([d.residentEmail || d.raisedByEmail], { type: "ticket_update", ticketId: id, title: `${id} assigned`, body: `Your complaint has been assigned to ${team}. We'll update you as work progresses.` });
     return { ok: true };
   }
 
@@ -2260,7 +2273,7 @@ exports.ticketHub = onCall({ region: "asia-south1" }, async (request) => {
     if (status === "Resolved") patch.resolvedAt = admin.firestore.FieldValue.serverTimestamp();
     await ref.set(patch, { merge: true });
     await writeAudit("Updated complaint", "Ticket", `${id} · ${status}`, caller);
-    await notifyRecipients([d.raisedByEmail], { type: "ticket_update", ticketId: id, title: `${id} · ${status}`, body: `Your complaint status is now "${status}".` });
+    await notifyRecipients([d.residentEmail || d.raisedByEmail], { type: "ticket_update", ticketId: id, title: `${id} · ${status}`, body: `Your complaint status is now "${status}".` });
     return { ok: true };
   }
 
@@ -2280,7 +2293,7 @@ exports.ticketHub = onCall({ region: "asia-south1" }, async (request) => {
     await ref.collection("comments").add({ authorEmail: caller.email, authorName: caller.profile.name || caller.email, authorRole: caller.profile.role || "resident", text, internal, createdAt: admin.firestore.FieldValue.serverTimestamp() });
     await ref.set({ commentCount: admin.firestore.FieldValue.increment(1), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     await writeAudit("Commented on complaint", "Ticket", `${id}${internal ? " (internal)" : ""}`, caller);
-    if (isManager && !internal) await notifyRecipients([d.raisedByEmail], { type: "ticket_comment", ticketId: id, title: `New reply on ${id}`, body: text.slice(0, 140) });
+    if (isManager && !internal) await notifyRecipients([d.residentEmail || d.raisedByEmail], { type: "ticket_comment", ticketId: id, title: `New reply on ${id}`, body: text.slice(0, 140) });
     else if (!isManager) await notifyRecipients(await ticketManagerEmails(), { type: "ticket_comment", ticketId: id, title: `New comment on ${id}`, body: `${d.flat}: ${text.slice(0, 140)}` });
     return { ok: true };
   }
@@ -2295,7 +2308,7 @@ exports.ticketHub = onCall({ region: "asia-south1" }, async (request) => {
     const d = snap.data();
     await ref.set({ status: "Closed", closedAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp(), timeline: admin.firestore.FieldValue.arrayUnion(ticketTimelineEntry(caller, "Closed", String(payload.note || ""))) }, { merge: true });
     await writeAudit("Closed complaint", "Ticket", id, caller);
-    await notifyRecipients([d.raisedByEmail], { type: "ticket_closed", ticketId: id, title: `${id} closed`, body: "Your complaint has been closed. Please share feedback on the service." });
+    await notifyRecipients([d.residentEmail || d.raisedByEmail], { type: "ticket_closed", ticketId: id, title: `${id} closed`, body: "Your complaint has been closed. Please share feedback on the service." });
     return { ok: true };
   }
 
