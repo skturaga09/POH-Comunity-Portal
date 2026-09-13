@@ -3416,7 +3416,14 @@ async function renderHelpdeskStats() {
   try {
     const { data } = await ticketHubCall({ action: "stats" });
     const tile = (label, val, color) => `<div style="background:#f6faf6;border-radius:10px;padding:12px 14px;text-align:center;"><div style="font-size:22px;font-weight:800;color:${color};">${val}</div><div style="font-size:12px;color:#68736c;">${label}</div></div>`;
-    box.innerHTML = tile("Open", data.open, "#8b6416") + tile("Resolved", data.resolved, "#1c7a3f") + tile("Closed", data.closed, "#4a5951") + tile("Total", data.total, "#183e35") + tile("Avg rating", data.ratingCount ? data.avgRating.toFixed(1) + "★" : "—", "#d99a32");
+    let html = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:12px;">${tile("Open", data.open, "#8b6416")}${tile("Resolved", data.resolved, "#1c7a3f")}${tile("Closed", data.closed, "#4a5951")}${tile("Total", data.total, "#183e35")}${tile("Avg rating", data.ratingCount ? data.avgRating.toFixed(1) + "★" : "—", "#d99a32")}</div>`;
+    if (data.canSeeDetail) {
+      const cats = Object.entries(data.byCategory || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<span class="category-chip">${escapeHtml(k)}: ${v}</span>`).join(" ");
+      const fb = (data.recentFeedback || []).slice(0, 5).map((f) => `<div style="font-size:12px;color:#43534d;">${"★".repeat(f.rating)}<span style="color:#d9ddd3;">${"★".repeat(5 - f.rating)}</span> ${escapeHtml(f.byName || "")}${f.comment ? " — " + escapeHtml(f.comment) : ""}</div>`).join("");
+      html += `<div style="background:#fff;border:1px solid #eef1ee;border-radius:10px;padding:12px;margin-top:10px;"><p class="eyebrow" style="margin:0 0 6px;">Breakdown</p>${cats || '<span style="color:#8b9a91;">No complaints yet.</span>'}${data.avgResolutionHours ? `<div style="font-size:12px;color:#68736c;margin-top:6px;">Average resolution time: <strong>${data.avgResolutionHours.toFixed(1)} hours</strong></div>` : ""}${fb ? `<p class="eyebrow" style="margin:10px 0 4px;">Recent feedback</p>${fb}` : ""}</div>`;
+    }
+    box.style.display = "block";
+    box.innerHTML = html;
     box.hidden = false;
   } catch (e) { box.hidden = true; }
 }
@@ -3429,7 +3436,7 @@ async function renderHelpdesk() {
     const { data } = await ticketHubCall({ action: "list", payload: status ? { status } : {} });
     helpdeskState = { items: data.items || [], isManager: Boolean(data.isManager) };
     if (byId("helpdeskRoleBadge")) byId("helpdeskRoleBadge").textContent = helpdeskState.isManager ? "Manager queue" : "My complaints";
-    if (helpdeskState.isManager) renderHelpdeskStats(); else if (byId("helpdeskStats")) byId("helpdeskStats").hidden = true;
+    renderHelpdeskStats(); if (byId("helpdeskReportBtn")) byId("helpdeskReportBtn").hidden = !helpdeskState.isManager;
     list.innerHTML = helpdeskState.items.length ? helpdeskState.items.map(ticketCard).join("") : empty("No complaints yet. Tap “Raise a complaint” to report an issue.");
   } catch (e) {
     list.innerHTML = empty(e && e.message ? e.message : "Could not load complaints.");
@@ -3594,6 +3601,29 @@ byId("markAllNotifsBtn")?.addEventListener("click", async () => {
   try { const { data } = await notificationHubCall({ action: "list" }); const ids = (data.items || []).filter((i) => !i.read).map((i) => i.id); if (ids.length) await notificationHubCall({ action: "markRead", payload: { ids } }); renderNotifications(); } catch (e) {}
 });
 byId("homeNotificationsList")?.addEventListener("click", (e) => { const el = e.target.closest("[data-notif-ticket]"); const tid = el && el.dataset.notifTicket; if (tid) { activateRoute("maintenance"); setTimeout(() => openTicketDetail(tid), 80); } });
+// ---------- Monthly helpdesk report ----------
+byId("helpdeskReportBtn")?.addEventListener("click", () => { const m = new Date(); const mv = `${m.getFullYear()}-${String(m.getMonth() + 1).padStart(2, "0")}`; if (byId("reportMonth")) byId("reportMonth").value = mv; if (byId("reportPreview")) byId("reportPreview").innerHTML = ""; if (byId("reportPublishBtn")) byId("reportPublishBtn").hidden = true; byId("ticketReportModal").showModal(); generateHelpdeskReport(); });
+byId("reportGenerateBtn")?.addEventListener("click", generateHelpdeskReport);
+byId("reportPublishBtn")?.addEventListener("click", publishHelpdeskReport);
+async function generateHelpdeskReport() {
+  const month = byId("reportMonth") ? byId("reportMonth").value : "";
+  if (!month) { showToast("Pick a month.", "warning"); return; }
+  byId("reportPreview").innerHTML = '<p style="color:#68736c;">Generating…</p>';
+  try {
+    const { data } = await ticketHubCall({ action: "monthlyReport", payload: { month } });
+    const tile = (l, v) => `<div style="background:#f6faf6;border-radius:8px;padding:10px;text-align:center;"><div style="font-size:20px;font-weight:800;color:#183e35;">${v}</div><div style="font-size:12px;color:#68736c;">${l}</div></div>`;
+    const cats = Object.entries(data.byCategory || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<span class="category-chip">${escapeHtml(k)}: ${v}</span>`).join(" ") || '<span style="color:#8b9a91;">No complaints this month.</span>';
+    byId("reportPreview").innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:8px;margin-bottom:10px;">${tile("Raised", data.raised)}${tile("Closed", data.closed)}${tile("Open (all)", data.openNow)}${tile("Avg rating", data.ratingCount ? data.avgRating.toFixed(1) + "★" : "—")}${tile("Avg resolve", data.avgResolutionHours ? data.avgResolutionHours.toFixed(1) + "h" : "—")}</div><div>${cats}</div>`;
+    if (byId("reportPublishBtn")) byId("reportPublishBtn").hidden = !adminRoles.has(approvedProfile?.role);
+  } catch (e) { byId("reportPreview").innerHTML = `<p style="color:#9c3f34;">${escapeHtml(e && e.message ? e.message : "Failed to generate report.")}</p>`; }
+}
+async function publishHelpdeskReport() {
+  const month = byId("reportMonth") ? byId("reportMonth").value : "";
+  if (!month) return;
+  if (!window.confirm("Publish this month's helpdesk summary as a community notice?")) return;
+  try { await ticketHubCall({ action: "monthlyReport", payload: { month, publish: true } }); showToast("Monthly report published to the community.", "success"); byId("ticketReportModal").close(); }
+  catch (e) { showToast(e && e.message ? e.message : "Publish failed.", "error"); }
+}
 
 let currentReminderCardDetails = null;
 
