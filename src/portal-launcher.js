@@ -1585,6 +1585,20 @@ function activateRoute(route) {
   if (svcTab) svcTab.classList.toggle("tab-active", ["amenities", "move", "moveManagement", "maintenance", "feedback"].includes(route));
   if (commTab) commTab.classList.toggle("tab-active", ["directory", "notices", "gallery"].includes(route));
 
+  // Mobile app-bar title: a personal greeting on Home, the brand name elsewhere.
+  const greetEl = byId("appbarGreeting"), subEl = byId("appbarSub");
+  if (greetEl) {
+    if (route === "home") {
+      const fullName = (byId("portalUserName")?.textContent || "").trim();
+      const firstName = fullName.split(/\s+/)[0] || "there";
+      greetEl.textContent = `Namaste, ${firstName} 👋`;
+      if (subEl) subEl.textContent = [approvedProfile?.flat ? `Flat ${approvedProfile.flat}` : "", approvedProfile?.role ? roleLabel(approvedProfile.role) : ""].filter(Boolean).join(" · ");
+    } else {
+      greetEl.textContent = "Community Portal";
+      if (subEl) subEl.textContent = "";
+    }
+  }
+
   byId("portal").classList.toggle("home-active", route === "home");
   if (route === "directory") renderDirectory();
   if (route === "feedback") loadFeedback();
