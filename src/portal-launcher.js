@@ -1579,9 +1579,11 @@ function activateRoute(route) {
     if (groupBtn) groupBtn.classList.toggle("active-route", hasActiveChild);
   });
 
-  // Bottom-nav "More" tab: light it up when the active route lives in the sheet.
-  const moreTab = byId("appMoreTab");
-  if (moreTab) moreTab.classList.toggle("tab-active", ["directory", "notices", "gallery", "feedback", "amenities", "move", "moveManagement", "contacts", "admin"].includes(route));
+  // Keep the parent bottom-tab lit while viewing a page that lives inside its hub.
+  const svcTab = document.querySelector('.app-tabbar [data-route="services"]');
+  const commTab = document.querySelector('.app-tabbar [data-route="community"]');
+  if (svcTab) svcTab.classList.toggle("tab-active", ["amenities", "move", "moveManagement", "maintenance", "feedback"].includes(route));
+  if (commTab) commTab.classList.toggle("tab-active", ["directory", "notices", "gallery"].includes(route));
 
   byId("portal").classList.toggle("home-active", route === "home");
   if (route === "directory") renderDirectory();
@@ -1682,6 +1684,9 @@ async function enterPortal(user) {
   setProfileImage("portalUserPhoto", user.photoURL, name);
   if (byId("myFlatHomeTitle")) byId("myFlatHomeTitle").textContent = approvedProfile.flat ? `Flat ${approvedProfile.flat}` : "My flat";
   if (byId("myFlatHomeSub")) byId("myFlatHomeSub").textContent = `${name} · ${roleLabel(approvedProfile.role)}`;
+  if (byId("accountName")) byId("accountName").textContent = name;
+  if (byId("accountFlat")) byId("accountFlat").textContent = [approvedProfile.flat ? `Flat ${approvedProfile.flat}` : "", roleLabel(approvedProfile.role)].filter(Boolean).join(" · ");
+  if (byId("accountAvatarLetter")) byId("accountAvatarLetter").textContent = (name || "?").trim().charAt(0).toUpperCase();
   const hasAdminAccess = adminRoles.has(approvedProfile.role);
   if (byId("adminNavWrap")) byId("adminNavWrap").hidden = !hasAdminAccess;
   if (byId("adminNav")) byId("adminNav").hidden = !hasAdminAccess;
@@ -1698,7 +1703,7 @@ async function enterPortal(user) {
     // Expansion data (amenities/move/contacts/gallery) is now loaded lazily when
     // one of those pages — or the admin console — is first opened. See activateRoute.
     const savedRoute = window.location.hash ? window.location.hash.replace("#", "") : "home";
-    const validRoutes = ["home", "events", "notices", "directory", "gallery", "amenities", "move", "contacts", "maintenance", "admin"];
+    const validRoutes = ["home", "events", "services", "community", "notices", "directory", "gallery", "amenities", "move", "feedback", "contacts", "maintenance", "admin"];
     activateRoute(validRoutes.includes(savedRoute) ? savedRoute : "home");
     refreshNotificationBadge();
   } catch (error) {
@@ -1966,19 +1971,25 @@ document.querySelectorAll("[data-route]").forEach((button) => button.addEventLis
 // App-style bottom navigation: the "More" tab opens a bottom sheet with the
 // overflow destinations. The sheet's items carry data-route, so they already
 // route via the wiring above; here we only manage opening/closing the sheet.
-(function setupMoreSheet() {
-  const moreTab = byId("appMoreTab");
+// Header avatar opens the Account menu (Admin console, Notifications, Sign out);
+// the SOS pill jumps straight to Emergency contacts; the My Flat tab opens the
+// resident's own record.
+(function setupAccountSheet() {
+  const trigger = document.querySelector(".portal-top .user-chip");
   const sheet = byId("appMoreSheet");
   const backdrop = byId("appMoreBackdrop");
-  if (!moreTab || !sheet || !backdrop) return;
-  const open = () => { sheet.classList.add("open"); backdrop.classList.add("open"); moreTab.setAttribute("aria-expanded", "true"); };
-  const close = () => { sheet.classList.remove("open"); backdrop.classList.remove("open"); moreTab.setAttribute("aria-expanded", "false"); };
-  moreTab.addEventListener("click", () => (sheet.classList.contains("open") ? close() : open()));
-  backdrop.addEventListener("click", close);
-  sheet.querySelectorAll("[data-route]").forEach((button) => button.addEventListener("click", close));
-  const myFlatTab = byId("appMyFlatTab");
-  if (myFlatTab) myFlatTab.addEventListener("click", openMyFlat);
-  document.addEventListener("keydown", (event) => { if (event.key === "Escape") close(); });
+  const close = () => { sheet?.classList.remove("open"); backdrop?.classList.remove("open"); };
+  if (trigger && sheet && backdrop) {
+    const open = () => { sheet.classList.add("open"); backdrop.classList.add("open"); };
+    trigger.addEventListener("click", () => (sheet.classList.contains("open") ? close() : open()));
+    backdrop.addEventListener("click", close);
+    sheet.querySelectorAll("[data-route]").forEach((button) => button.addEventListener("click", close));
+    byId("accountSignOut")?.addEventListener("click", () => { close(); signOut(auth); });
+    byId("accountNotifs")?.addEventListener("click", () => { close(); openNotifSheet(); });
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") close(); });
+  }
+  byId("appMyFlatTab")?.addEventListener("click", openMyFlat);
+  byId("topSosBtn")?.addEventListener("click", () => activateRoute("contacts"));
 })();
 byId("directorySearch").addEventListener("input", renderDirectory);
 byId("occupancyFilter").addEventListener("change", renderDirectory);
@@ -3682,7 +3693,6 @@ byId("markAllNotifsBtn")?.addEventListener("click", async () => {
 });
 byId("homeNotificationsList")?.addEventListener("click", (e) => { const el = e.target.closest("[data-notif-ticket]"); const tid = el && el.dataset.notifTicket; if (tid) { activateRoute("maintenance"); setTimeout(() => openTicketDetail(tid), 80); } });
 byId("topNotifBtn")?.addEventListener("click", openNotifSheet);
-document.querySelector(".portal-top .user-chip")?.addEventListener("click", openMyFlat);
 byId("notifBackdrop")?.addEventListener("click", closeNotifSheet);
 byId("notifSheetMarkAll")?.addEventListener("click", async () => {
   try { const { data } = await notificationHubCall({ action: "list" }); const ids = (data.items || []).filter((i) => !i.read).map((i) => i.id); if (ids.length) await notificationHubCall({ action: "markRead", payload: { ids } }); await openNotifSheet(); renderNotifications(); } catch (e) {}
