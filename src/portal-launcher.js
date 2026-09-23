@@ -1700,6 +1700,7 @@ async function enterPortal(user) {
     const savedRoute = window.location.hash ? window.location.hash.replace("#", "") : "home";
     const validRoutes = ["home", "events", "notices", "directory", "gallery", "amenities", "move", "contacts", "maintenance", "admin"];
     activateRoute(validRoutes.includes(savedRoute) ? savedRoute : "home");
+    refreshNotificationBadge();
   } catch (error) {
     console.error("Unable to load portal data", error);
     byId("portal").hidden = true;
@@ -3630,6 +3631,21 @@ byId("helpdeskList")?.addEventListener("click", (e) => { const card = e.target.c
 byId("ticketDetailBody")?.addEventListener("click", (e) => { const btn = e.target.closest("[data-ticket-action]"); if (btn) handleTicketAction(btn.dataset.ticketAction, btn); });
 // ---------- In-app notifications (home feed) ----------
 function notifTime(ts) { const s = ts && (ts._seconds != null ? ts._seconds : ts.seconds); return s ? new Date(s * 1000).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : ""; }
+// Shared notification row markup (used by the Home card and the top-bar bell sheet).
+function notifItemHtml(n) {
+  return `<div data-notif-ticket="${escapeHtml(n.ticketId || "")}" style="cursor:${n.ticketId ? "pointer" : "default"};display:flex;gap:10px;align-items:flex-start;padding:10px;border-radius:10px;background:${n.read ? "var(--surface-2)" : "var(--gold-soft)"};border:1px solid ${n.read ? "var(--hair)" : "var(--gold)"};"><i class="fa-solid ${n.read ? "fa-circle-check" : "fa-bell"}" style="color:${n.read ? "var(--muted)" : "var(--gold)"};margin-top:2px;" aria-hidden="true"></i><div style="flex:1;min-width:0;"><strong style="color:var(--ink);font-size:13px;">${escapeHtml(n.title)}</strong><div style="font-size:13px;color:var(--muted);">${escapeHtml(n.body)}</div><small style="color:var(--muted);">${escapeHtml(notifTime(n.createdAt))}</small></div></div>`;
+}
+// Top-bar bell badge: shows the unread count (capped at 9+), hidden when zero.
+function setTopNotifBadge(count) {
+  const badge = byId("topNotifBadge");
+  if (!badge) return;
+  const c = Number(count) || 0;
+  if (c > 0) { badge.textContent = c > 9 ? "9+" : String(c); badge.hidden = false; }
+  else badge.hidden = true;
+}
+async function refreshNotificationBadge() {
+  try { const { data } = await notificationHubCall({ action: "list" }); setTopNotifBadge(data.unread); } catch (e) {}
+}
 async function renderNotifications() {
   const card = byId("homeNotificationsCard");
   if (!card) return;
@@ -3640,13 +3656,39 @@ async function renderNotifications() {
     card.hidden = false;
     const badge = byId("homeNotifUnread");
     if (badge) { if (data.unread) { badge.textContent = data.unread + " new"; badge.style.display = "inline-block"; } else { badge.style.display = "none"; } }
-    byId("homeNotificationsList").innerHTML = items.map((n) => `<div data-notif-ticket="${escapeHtml(n.ticketId || "")}" style="cursor:${n.ticketId ? "pointer" : "default"};display:flex;gap:10px;align-items:flex-start;padding:10px;border-radius:8px;background:${n.read ? "#f6faf6" : "#fffdf6"};border:1px solid ${n.read ? "#eef1ee" : "#f0e0b8"};"><i class="fa-solid ${n.read ? "fa-circle-check" : "fa-bell"}" style="color:${n.read ? "#8b9a91" : "#d99a32"};margin-top:2px;" aria-hidden="true"></i><div style="flex:1;"><strong style="color:#183e35;font-size:13px;">${escapeHtml(n.title)}</strong><div style="font-size:13px;color:#43534d;">${escapeHtml(n.body)}</div><small style="color:#8b9a91;">${escapeHtml(notifTime(n.createdAt))}</small></div></div>`).join("");
+    setTopNotifBadge(data.unread);
+    byId("homeNotificationsList").innerHTML = items.map(notifItemHtml).join("");
   } catch (e) { card.hidden = true; }
+}
+// Top-bar bell → notifications bottom sheet (reuses the notificationHub data).
+async function openNotifSheet() {
+  const sheet = byId("notifSheet"), backdrop = byId("notifBackdrop"), list = byId("notifSheetList"), empty = byId("notifSheetEmpty");
+  if (!sheet || !backdrop) return;
+  sheet.classList.add("open"); backdrop.classList.add("open");
+  try {
+    const { data } = await notificationHubCall({ action: "list" });
+    const items = data.items || [];
+    setTopNotifBadge(data.unread);
+    if (list) { list.innerHTML = items.map(notifItemHtml).join(""); list.hidden = items.length === 0; }
+    if (empty) empty.hidden = items.length > 0;
+  } catch (e) { if (list) { list.innerHTML = ""; list.hidden = true; } if (empty) empty.hidden = false; }
+}
+function closeNotifSheet() {
+  byId("notifSheet")?.classList.remove("open");
+  byId("notifBackdrop")?.classList.remove("open");
 }
 byId("markAllNotifsBtn")?.addEventListener("click", async () => {
   try { const { data } = await notificationHubCall({ action: "list" }); const ids = (data.items || []).filter((i) => !i.read).map((i) => i.id); if (ids.length) await notificationHubCall({ action: "markRead", payload: { ids } }); renderNotifications(); } catch (e) {}
 });
 byId("homeNotificationsList")?.addEventListener("click", (e) => { const el = e.target.closest("[data-notif-ticket]"); const tid = el && el.dataset.notifTicket; if (tid) { activateRoute("maintenance"); setTimeout(() => openTicketDetail(tid), 80); } });
+byId("topNotifBtn")?.addEventListener("click", openNotifSheet);
+document.querySelector(".portal-top .user-chip")?.addEventListener("click", openMyFlat);
+byId("notifBackdrop")?.addEventListener("click", closeNotifSheet);
+byId("notifSheetMarkAll")?.addEventListener("click", async () => {
+  try { const { data } = await notificationHubCall({ action: "list" }); const ids = (data.items || []).filter((i) => !i.read).map((i) => i.id); if (ids.length) await notificationHubCall({ action: "markRead", payload: { ids } }); await openNotifSheet(); renderNotifications(); } catch (e) {}
+});
+byId("notifSheetList")?.addEventListener("click", (e) => { const el = e.target.closest("[data-notif-ticket]"); const tid = el && el.dataset.notifTicket; if (tid) { closeNotifSheet(); activateRoute("maintenance"); setTimeout(() => openTicketDetail(tid), 80); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeNotifSheet(); });
 // ---------- Monthly helpdesk report ----------
 byId("helpdeskReportBtn")?.addEventListener("click", () => { const m = new Date(); const mv = `${m.getFullYear()}-${String(m.getMonth() + 1).padStart(2, "0")}`; if (byId("reportMonth")) byId("reportMonth").value = mv; if (byId("reportPreview")) byId("reportPreview").innerHTML = ""; if (byId("reportPublishBtn")) byId("reportPublishBtn").hidden = true; byId("ticketReportModal").showModal(); generateHelpdeskReport(); });
 byId("reportGenerateBtn")?.addEventListener("click", generateHelpdeskReport);
