@@ -2351,7 +2351,7 @@ exports.ticketHub = onCall({ region: "asia-south1" }, async (request) => {
 
   // ---- Dashboard stats (manager/admin/committee) ---------------------------
   if (action === "stats") {
-    if (!isManager && !DIRECTORY_EDITOR_ROLES.includes(caller.profile.role)) throw new HttpsError("permission-denied", "Not permitted.");
+    const canSeeDetail = isManager || DIRECTORY_EDITOR_ROLES.includes(caller.profile.role);
     const snap = await db.collection("tickets").get();
     const byStatus = {}; const byCategory = {}; const byTeam = {};
     let ratingSum = 0, ratingCount = 0, resolvedDurationSum = 0, resolvedDurationCount = 0;
@@ -2368,11 +2368,49 @@ exports.ticketHub = onCall({ region: "asia-south1" }, async (request) => {
     const open = (byStatus["Open"] || 0) + (byStatus["Assigned"] || 0) + (byStatus["In Progress"] || 0) + (byStatus["Reopened"] || 0);
     return {
       total, open, resolved: byStatus["Resolved"] || 0, closed: byStatus["Closed"] || 0, cancelled: byStatus["Cancelled"] || 0,
-      byStatus, byCategory, byTeam,
+      byStatus, byCategory, byTeam: canSeeDetail ? byTeam : {},
       avgRating: ratingCount ? ratingSum / ratingCount : 0, ratingCount,
-      avgResolutionHours: resolvedDurationCount ? (resolvedDurationSum / resolvedDurationCount) / 3600000 : 0,
-      recentFeedback
+      avgResolutionHours: canSeeDetail && resolvedDurationCount ? (resolvedDurationSum / resolvedDurationCount) / 3600000 : 0,
+      recentFeedback: canSeeDetail ? recentFeedback : [],
+      canSeeDetail
     };
+  }
+
+  // ---- Monthly report (managers/admins; admins can publish to the community) ----
+  if (action === "monthlyReport") {
+    if (!isManager) throw new HttpsError("permission-denied", "Only the manager or an administrator can generate reports.");
+    const month = String(payload.month || "");
+    const mm = /^(\d{4})-(\d{2})$/.exec(month);
+    if (!mm) throw new HttpsError("invalid-argument", "Choose a valid month (YYYY-MM).");
+    const year = Number(mm[1]), mon = Number(mm[2]);
+    const start = new Date(Date.UTC(year, mon - 1, 1)), end = new Date(Date.UTC(year, mon, 1));
+    const inMonth = (ts) => ts && ts.toMillis && ts.toMillis() >= start.getTime() && ts.toMillis() < end.getTime();
+    const snap = await db.collection("tickets").get();
+    let raised = 0, closed = 0, openNow = 0, ratingSum = 0, ratingCount = 0, resSum = 0, resCount = 0;
+    const byCategory = {};
+    snap.docs.forEach((doc) => {
+      const d = doc.data();
+      if (inMonth(d.createdAt)) { raised++; byCategory[d.category || "Other"] = (byCategory[d.category || "Other"] || 0) + 1; }
+      if (inMonth(d.closedAt)) { closed++; if (d.createdAt && d.createdAt.toMillis) { resSum += (d.closedAt.toMillis() - d.createdAt.toMillis()); resCount++; } }
+      if (d.feedback && inMonth(d.feedback.submittedAt) && Number(d.feedback.rating)) { ratingSum += Number(d.feedback.rating); ratingCount++; }
+      if (TICKET_OPEN_STATES.includes(d.status)) openNow++;
+    });
+    const report = { month, raised, closed, openNow, avgRating: ratingCount ? ratingSum / ratingCount : 0, ratingCount, avgResolutionHours: resCount ? (resSum / resCount) / 3600000 : 0, byCategory };
+    if (payload.publish === true || payload.publish === "true") {
+      if (!ADMIN_ROLES.includes(caller.profile.role)) throw new HttpsError("permission-denied", "Only an administrator can publish the report to the community.");
+      const monthName = start.toLocaleString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
+      const catLines = Object.entries(byCategory).sort((a, b) => b[1] - a[1]).map(([k, v]) => `\u2022 ${k}: ${v}`).join("\n");
+      const body = `Helpdesk summary for ${monthName}\n\n` +
+        `Complaints raised: ${raised}\nComplaints closed: ${closed}\nStill open (all-time): ${openNow}\n` +
+        `Average resolution: ${report.avgResolutionHours ? report.avgResolutionHours.toFixed(1) + " hours" : "\u2014"}\n` +
+        `Resident satisfaction: ${ratingCount ? report.avgRating.toFixed(1) + "/5 (" + ratingCount + " ratings)" : "no ratings yet"}` +
+        (catLines ? `\n\nBy category:\n${catLines}` : "");
+      const noticeRef = db.collection("notices").doc();
+      await noticeRef.set({ id: noticeRef.id, title: `Helpdesk monthly report \u2014 ${monthName}`, body, type: "Report", priority: "Normal", expiresAt: "", published: true, publishedAt: admin.firestore.FieldValue.serverTimestamp(), publishedBy: caller.email });
+      await writeAudit("Published helpdesk monthly report", "Report", monthName, caller);
+      report.published = true; report.noticeId = noticeRef.id;
+    }
+    return report;
   }
 
   throw new HttpsError("invalid-argument", "Unknown ticket action.");
