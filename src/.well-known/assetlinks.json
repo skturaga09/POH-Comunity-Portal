@@ -3,7 +3,7 @@
     "relation": ["delegate_permission/common.handle_all_urls"],
     "target": {
       "namespace": "android_app",
-      "package_name": "app.poh.community",
+      "package_name": "app.pursuitofhappiness.portal",
       "sha256_cert_fingerprints": [
         "6B:53:67:0D:C4:BB:14:EF:1A:AB:2B:FA:81:78:1E:66:94:2C:60:6F:5D:82:5F:24:A3:83:9E:9E:92:89:94:CC"
       ]
