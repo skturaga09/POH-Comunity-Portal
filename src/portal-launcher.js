@@ -1546,6 +1546,27 @@ function renderExpenseHistory() {
 
 function empty(message) { return `<div class="empty-state">${escapeHtml(message)}</div>`; }
 
+// Personalised "My Flat": find the logged-in resident's own directory record —
+// preferring an email match (owner/tenant/family), then their profile flat — and
+// open it in the standard profile view, which already exposes the Edit action to
+// the flat's owner. Keeps one code path for viewing/editing a resident.
+function findMyResident() {
+  const email = String(auth.currentUser?.email || "").toLowerCase();
+  const norm = (value) => String(value || "").trim().replace(/^0+/, "").toUpperCase();
+  const myFlat = norm(approvedProfile?.flat);
+  const residents = portalData.residents || [];
+  const emailMatch = residents.find((r) => [r.ownerEmail, r.ownerPrimaryEmail, r.ownerSecondaryEmail, r.tenantEmail, r.tenantPrimaryEmail, r.tenantSecondaryEmail, r.familyContactEmail].map((e) => String(e || "").trim().toLowerCase()).filter(Boolean).includes(email));
+  if (emailMatch) return emailMatch;
+  if (myFlat) return residents.find((r) => norm(r.flat) === myFlat || norm(r.flatNo) === myFlat) || null;
+  return null;
+}
+
+function openMyFlat() {
+  const resident = findMyResident();
+  if (resident) { openResidentProfile(resident); return; }
+  showToast("We couldn't find your flat's record yet. Please reach out to the committee if this continues.", "warning");
+}
+
 function activateRoute(route) {
   const targetId = route === "move" ? "moveManagementPage" : `${route}Page`;
   document.querySelectorAll(".page").forEach((page) => { page.hidden = page.id !== targetId; });
@@ -1557,6 +1578,10 @@ function activateRoute(route) {
     const groupBtn = wrap.querySelector(".nav-group-btn");
     if (groupBtn) groupBtn.classList.toggle("active-route", hasActiveChild);
   });
+
+  // Bottom-nav "More" tab: light it up when the active route lives in the sheet.
+  const moreTab = byId("appMoreTab");
+  if (moreTab) moreTab.classList.toggle("tab-active", ["directory", "notices", "gallery", "feedback", "amenities", "move", "moveManagement", "contacts", "admin"].includes(route));
 
   byId("portal").classList.toggle("home-active", route === "home");
   if (route === "directory") renderDirectory();
@@ -1655,9 +1680,12 @@ async function enterPortal(user) {
   byId("portalUserName").textContent = name;
   byId("portalUserRole").textContent = roleLabel(approvedProfile.role);
   setProfileImage("portalUserPhoto", user.photoURL, name);
+  if (byId("myFlatHomeTitle")) byId("myFlatHomeTitle").textContent = approvedProfile.flat ? `Flat ${approvedProfile.flat}` : "My flat";
+  if (byId("myFlatHomeSub")) byId("myFlatHomeSub").textContent = `${name} · ${roleLabel(approvedProfile.role)}`;
   const hasAdminAccess = adminRoles.has(approvedProfile.role);
   if (byId("adminNavWrap")) byId("adminNavWrap").hidden = !hasAdminAccess;
   if (byId("adminNav")) byId("adminNav").hidden = !hasAdminAccess;
+  if (byId("moreSheetAdmin")) byId("moreSheetAdmin").hidden = !hasAdminAccess;
   const canManageUsers = ["super_admin", "admin"].includes(approvedProfile?.role);
   if (byId("navAccessOption")) byId("navAccessOption").hidden = !canManageUsers;
   const canManageFinance = financeRoles.has(approvedProfile?.role);
@@ -1934,6 +1962,23 @@ byId("primaryAction").addEventListener("click", async () => {
 });
 byId("signOutAction").addEventListener("click", () => signOut(auth));
 document.querySelectorAll("[data-route]").forEach((button) => button.addEventListener("click", () => activateRoute(button.dataset.route)));
+// App-style bottom navigation: the "More" tab opens a bottom sheet with the
+// overflow destinations. The sheet's items carry data-route, so they already
+// route via the wiring above; here we only manage opening/closing the sheet.
+(function setupMoreSheet() {
+  const moreTab = byId("appMoreTab");
+  const sheet = byId("appMoreSheet");
+  const backdrop = byId("appMoreBackdrop");
+  if (!moreTab || !sheet || !backdrop) return;
+  const open = () => { sheet.classList.add("open"); backdrop.classList.add("open"); moreTab.setAttribute("aria-expanded", "true"); };
+  const close = () => { sheet.classList.remove("open"); backdrop.classList.remove("open"); moreTab.setAttribute("aria-expanded", "false"); };
+  moreTab.addEventListener("click", () => (sheet.classList.contains("open") ? close() : open()));
+  backdrop.addEventListener("click", close);
+  sheet.querySelectorAll("[data-route]").forEach((button) => button.addEventListener("click", close));
+  const myFlatTab = byId("appMyFlatTab");
+  if (myFlatTab) myFlatTab.addEventListener("click", openMyFlat);
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape") close(); });
+})();
 byId("directorySearch").addEventListener("input", renderDirectory);
 byId("occupancyFilter").addEventListener("change", renderDirectory);
 byId("directoryFloorTabs").addEventListener("click", (event) => {
@@ -2107,6 +2152,7 @@ byId("eventGrid").addEventListener("click", async (event) => {
   }
 });
 byId("homeExploreEvents").addEventListener("click", () => activateRoute("events"));
+if (byId("myFlatHomeBtn")) byId("myFlatHomeBtn").addEventListener("click", openMyFlat);
 byId("homeViewNotices").addEventListener("click", () => activateRoute("notices"));
 byId("homeEventContent").addEventListener("click", async (event) => { const id = event.target.closest("[data-home-event]")?.dataset.homeEvent; if (id) { activeEventId = id; await ensureEventFinance(id); renderEventDashboard(); activateRoute("eventDashboard"); } });
 byId("homeNoticeList").addEventListener("click", (event) => {
