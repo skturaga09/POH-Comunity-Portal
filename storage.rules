@@ -34,6 +34,15 @@ service firebase.storage {
         && (request.resource.contentType.matches('image/.*|application/pdf|application/octet-stream') || request.resource.contentType == '');
     }
 
+    // Helpdesk complaint photos: any authenticated portal user may upload one.
+    // The ticket record itself is created/gated by the ticketHub Cloud Function.
+    match /ticket-photos/{fileName} {
+      allow read: if signedIn();
+      allow write: if signedIn()
+        && request.resource.size < 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
     match /committee-photos/{fileName} {
       allow read: if signedIn();
       allow write: if signedIn()
