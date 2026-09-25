@@ -2149,6 +2149,41 @@ async function notifyRecipients(emails, note) {
     batch.set(ref, { id: ref.id, recipientEmail: email, read: false, createdAt: admin.firestore.FieldValue.serverTimestamp(), ...note });
   });
   await batch.commit();
+  // Best-effort phone push on top of the in-app bell (never fails the caller).
+  try { await sendPushToEmails(uniq, note); } catch (e) { logger.warn(`push send failed: ${e.message}`); }
+}
+
+/** Look up the registered device tokens for a set of recipient emails. */
+async function pushTokensForEmails(emails) {
+  const uniq = [...new Set((emails || []).map((e) => String(e || "").trim().toLowerCase()).filter(Boolean))];
+  if (!uniq.length) return [];
+  const recs = [];
+  for (let i = 0; i < uniq.length; i += 10) {
+    const chunk = uniq.slice(i, i + 10);
+    const snap = await db.collection("pushTokens").where("email", "in", chunk).get();
+    snap.docs.forEach((d) => { if (d.data().token) recs.push({ token: d.data().token, id: d.id }); });
+  }
+  return recs;
+}
+
+/** Send an FCM push to every device registered for these emails; prune dead tokens. */
+async function sendPushToEmails(emails, note) {
+  const recs = await pushTokensForEmails(emails);
+  if (!recs.length) return;
+  const resp = await admin.messaging().sendEachForMulticast({
+    tokens: recs.map((r) => r.token),
+    notification: { title: note.title || "POH One", body: (note.body || "").slice(0, 240) },
+    data: { type: String(note.type || ""), ticketId: String(note.ticketId || ""), noticeId: String(note.noticeId || "") },
+    android: { priority: "high", notification: { channelId: "poh_default" } },
+  });
+  const dead = [];
+  resp.responses.forEach((r, idx) => {
+    if (!r.success) {
+      const code = (r.error && r.error.code) || "";
+      if (code.includes("registration-token-not-registered") || code.includes("invalid-argument")) dead.push(recs[idx].id);
+    }
+  });
+  await Promise.all(dead.map((id) => db.collection("pushTokens").doc(id).delete().catch(() => {})));
 }
 
 function ticketTimelineEntry(caller, action, detail) {
@@ -2465,6 +2500,22 @@ exports.notificationHub = onCall({ region: "asia-south1" }, async (request) => {
       if (snap.exists && String(snap.data().recipientEmail || "").toLowerCase() === email) batch.set(ref, { read: true }, { merge: true });
     }
     await batch.commit();
+    return { ok: true };
+  }
+  if (action === "registerToken") {
+    const token = String(request.data?.payload?.token || "").trim();
+    if (!token) throw new HttpsError("invalid-argument", "A device token is required.");
+    const id = crypto.createHash("sha1").update(token).digest("hex");
+    await db.collection("pushTokens").doc(id).set({
+      token, email, uid: caller.uid,
+      platform: String(request.data?.payload?.platform || "android"),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    return { ok: true };
+  }
+  if (action === "unregisterToken") {
+    const token = String(request.data?.payload?.token || "").trim();
+    if (token) await db.collection("pushTokens").doc(crypto.createHash("sha1").update(token).digest("hex")).delete().catch(() => {});
     return { ok: true };
   }
   throw new HttpsError("invalid-argument", "Unknown notification action.");
