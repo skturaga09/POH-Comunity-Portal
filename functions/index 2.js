@@ -970,12 +970,6 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
 
     await bumpDirectoryVersion();
     await writeAudit("Updated resident profile", "Resident", `${flat} · ${occupancy}${subStatus ? ` (${subStatus})` : ""}${grantedAccess.length ? ` · access: ${grantedAccess.length}` : ""}`, caller);
-    // Notify the flat's residents that their profile was changed (skip the editor,
-    // so a resident's own self-service edit doesn't ping themselves).
-    const callerLower = String(caller.email || "").trim().toLowerCase();
-    const flatContacts = [ownerPrimaryEmail, ownerSecondaryEmail, tenantPrimaryEmail, tenantSecondaryEmail, next.familyContactEmail]
-      .filter(Boolean).filter((e) => String(e).toLowerCase() !== callerLower);
-    await notifyRecipients(flatContacts, { type: "profile_update", title: "Your flat profile was updated", body: `${flat} details were updated by ${caller.profile.name || "the committee"}.` });
     return { ok: true, accessGranted: grantedAccess.length };
   }
 
@@ -1311,8 +1305,6 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     const noticeRef = db.collection("notices").doc();
     await noticeRef.set({ id: noticeRef.id, title, body: String(payload.body || ""), type: String(payload.type || "Update"), priority: String(payload.priority || "Normal"), expiresAt: String(payload.expiresAt || ""), published: true, publishedAt: admin.firestore.FieldValue.serverTimestamp(), publishedBy: caller.email });
     await writeAudit("Published notice", "Notice", `${title} · ${payload.priority || "Normal"}`, caller);
-    // Notify every resident that a new notice was published.
-    await notifyRecipients(await allResidentEmails(), { type: "notice", noticeId: noticeRef.id, title: `New notice: ${title}`, body: String(payload.body || "").slice(0, 160) });
     return { id: noticeRef.id };
   }
   if (action === "approveExpense") {
@@ -1382,7 +1374,7 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     return { ...figures, commonPoolBalance: nextPool };
   }
   if (action === "bookAmenity") {
-    ensureActive(caller.profile); // any active resident may request a booking (status "Requested", pending admin approval)
+    ensureRole(caller.profile, ADMIN_ROLES);
     const amenity = String(payload.amenity || "").trim();
     const date = String(payload.date || "").trim();
     const slot = String(payload.slot || "Full Day").trim();
@@ -2153,18 +2145,6 @@ async function notifyRecipients(emails, note) {
 
 function ticketTimelineEntry(caller, action, detail) {
   return { at: new Date().toISOString(), by: caller.email, byName: caller.profile.name || caller.email, byRole: caller.profile.role || "resident", action, detail: detail || "" };
-}
-
-/** Every resident-facing email in the directory (owners, tenants, family contacts). */
-async function allResidentEmails() {
-  const snap = await db.collection("residents").get();
-  const emails = [];
-  snap.docs.forEach((d) => {
-    const r = d.data() || {};
-    [r.ownerEmail, r.ownerPrimaryEmail, r.ownerSecondaryEmail, r.tenantEmail, r.tenantPrimaryEmail, r.tenantSecondaryEmail, r.familyContactEmail]
-      .forEach((e) => { if (e) emails.push(e); });
-  });
-  return emails;
 }
 
 function publicTicket(id, d, opts) {
