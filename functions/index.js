@@ -888,9 +888,17 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
 
     const rawOccupancy = String(payload.occupancy || "").trim();
     const validOccupancies = ["Owner occupied", "Tenant occupied", "Unoccupied (Owner Owned)", "Vacant", "Unverified"];
-    const occupancy = validOccupancies.find(o => o.toLowerCase() === rawOccupancy.toLowerCase()) || "Unverified";
-    
-    const subStatus = String(payload.subStatus || "").trim();
+    // Preserve the stored value whenever the caller omits a field, so a partial /
+    // self-service update (e.g. a phone-only save from the app) never blanks
+    // occupancy, family-contact, tenant or caretaker data. The web app always sends
+    // the full payload, so its behaviour is unchanged.
+    const occupancy = rawOccupancy
+      ? (validOccupancies.find(o => o.toLowerCase() === rawOccupancy.toLowerCase()) || "Unverified")
+      : (before.occupancy || before.occupancyStatus || "Unverified");
+
+    const subStatus = payload.subStatus !== undefined ? String(payload.subStatus || "").trim() : String(before.subStatus || "").trim();
+    const resolvedOwnerName = String(payload.ownerName || before.ownerName || before.name || "").trim();
+    const resolvedTenantName = payload.tenantName !== undefined ? String(payload.tenantName || "").trim() : String(before.tenantName || "").trim();
     const ownerPrimaryEmail = payload.ownerPrimaryEmail !== undefined ? String(payload.ownerPrimaryEmail || "").trim().toLowerCase() : (payload.ownerEmail !== undefined ? String(payload.ownerEmail || "").trim().toLowerCase() : (before.ownerPrimaryEmail || before.ownerEmail || ""));
     const ownerSecondaryEmail = payload.ownerSecondaryEmail !== undefined ? String(payload.ownerSecondaryEmail || "").trim().toLowerCase() : (before.ownerSecondaryEmail || "");
     const tenantPrimaryEmail = payload.tenantPrimaryEmail !== undefined ? String(payload.tenantPrimaryEmail || "").trim().toLowerCase() : (payload.tenantEmail !== undefined ? String(payload.tenantEmail || "").trim().toLowerCase() : (before.tenantPrimaryEmail || before.tenantEmail || ""));
@@ -898,8 +906,8 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     const ownerEmail = ownerPrimaryEmail;
     const tenantEmail = tenantPrimaryEmail;
 
-    if (occupancy === "Owner occupied" && !String(payload.ownerName || "").trim()) throw new HttpsError("invalid-argument", "Enter the owner name for an owner-occupied flat.");
-    if (occupancy === "Tenant occupied" && !String(payload.tenantName || "").trim()) throw new HttpsError("invalid-argument", "Enter the tenant name for a tenant-occupied flat.");
+    if (occupancy === "Owner occupied" && !resolvedOwnerName) throw new HttpsError("invalid-argument", "Enter the owner name for an owner-occupied flat.");
+    if (occupancy === "Tenant occupied" && !resolvedTenantName) throw new HttpsError("invalid-argument", "Enter the tenant name for a tenant-occupied flat.");
     
     const parkingAllocation = ["", "Single car parking", "Double car parking"].includes(String(payload.parkingAllocation || "")) ? String(payload.parkingAllocation || "") : (before.parkingAllocation || "");
     const parkingLevel = ["", "B1", "B2"].includes(String(payload.parkingLevel || "").toUpperCase()) ? String(payload.parkingLevel || "").toUpperCase() : (before.parkingLevel || "");
@@ -924,20 +932,20 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
       tenantEmail,
       tenantPrimaryEmail,
       tenantSecondaryEmail,
-      familyContactName: String(payload.familyContactName || "").trim(),
-      familyContactMobile: String(payload.familyContactMobile || payload.familyContactPhone || "").trim(),
-      familyContactPhone: String(payload.familyContactMobile || payload.familyContactPhone || "").trim(),
-      familyContactEmail: String(payload.familyContactEmail || "").trim().toLowerCase(),
-      familyContactRelation: String(payload.familyContactRelation || "").trim(),
-      ownerName: String(payload.ownerName || before.ownerName || before.name || "").trim(),
+      familyContactName: payload.familyContactName !== undefined ? String(payload.familyContactName || "").trim() : String(before.familyContactName || "").trim(),
+      familyContactMobile: (payload.familyContactMobile !== undefined || payload.familyContactPhone !== undefined) ? String(payload.familyContactMobile || payload.familyContactPhone || "").trim() : String(before.familyContactMobile || before.familyContactPhone || "").trim(),
+      familyContactPhone: (payload.familyContactMobile !== undefined || payload.familyContactPhone !== undefined) ? String(payload.familyContactMobile || payload.familyContactPhone || "").trim() : String(before.familyContactPhone || before.familyContactMobile || "").trim(),
+      familyContactEmail: payload.familyContactEmail !== undefined ? String(payload.familyContactEmail || "").trim().toLowerCase() : String(before.familyContactEmail || "").trim().toLowerCase(),
+      familyContactRelation: payload.familyContactRelation !== undefined ? String(payload.familyContactRelation || "").trim() : String(before.familyContactRelation || "").trim(),
+      ownerName: resolvedOwnerName,
       phone: String(payload.ownerMobile || payload.phone || before.phone || before.ownerMobile || "").trim(),
       ownerMobile: String(payload.ownerMobile || payload.phone || before.ownerMobile || before.phone || "").trim(),
-      tenantName: String(payload.tenantName || "").trim(),
-      tenantMobile: String(payload.tenantMobile || "").trim(),
-      isOutstation: Boolean(payload.isOutstation),
-      caretakerName: String(payload.caretakerName || "").trim(),
-      caretakerMobile: String(payload.caretakerMobile || "").trim(),
-      caretakerRelation: String(payload.caretakerRelation || "").trim(),
+      tenantName: resolvedTenantName,
+      tenantMobile: payload.tenantMobile !== undefined ? String(payload.tenantMobile || "").trim() : String(before.tenantMobile || "").trim(),
+      isOutstation: payload.isOutstation !== undefined ? Boolean(payload.isOutstation) : Boolean(before.isOutstation),
+      caretakerName: payload.caretakerName !== undefined ? String(payload.caretakerName || "").trim() : String(before.caretakerName || "").trim(),
+      caretakerMobile: payload.caretakerMobile !== undefined ? String(payload.caretakerMobile || "").trim() : String(before.caretakerMobile || "").trim(),
+      caretakerRelation: payload.caretakerRelation !== undefined ? String(payload.caretakerRelation || "").trim() : String(before.caretakerRelation || "").trim(),
       parkingAllocation,
       parkingLevel,
       parkingSlots,
@@ -1466,7 +1474,7 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     return { ok: true };
   }
   if (action === "saveEmergencyContact") {
-    ensureRole(caller.profile, ADMIN_ROLES);
+    ensureRole(caller.profile, MANAGER_ROLES); // managers (assistant staff) maintain emergency contacts
     const name = String(payload.name || "").trim();
     const role = String(payload.role || "Emergency Contact").trim();
     const phone = String(payload.phone || "").trim();
@@ -1481,7 +1489,7 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     return { id: ref.id };
   }
   if (action === "deleteEmergencyContact") {
-    ensureRole(caller.profile, ADMIN_ROLES);
+    ensureRole(caller.profile, MANAGER_ROLES); // managers (assistant staff) maintain emergency contacts
     await db.collection("emergencyContacts").doc(String(payload.id)).delete();
     await writeAudit("Removed emergency contact", "Contacts", String(payload.name || payload.id), caller);
     return { ok: true };
