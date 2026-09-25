@@ -1490,6 +1490,7 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
       expectedTime,
       shiftingAgencyName,
       shiftingAgencyContact,
+      garbageWasteAmount: Number(payload.garbageWasteAmount || 0),
       familyMembers,
       domesticStaff,
       documentsSubmitted,
