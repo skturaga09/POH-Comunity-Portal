@@ -1382,22 +1382,43 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     return { ...figures, commonPoolBalance: nextPool };
   }
   if (action === "bookAmenity") {
-    ensureActive(caller.profile); // any active resident may request a booking (status "Requested", pending admin approval)
+    ensureActive(caller.profile);
+    const AMENITIES = ["Party Hall", "Amphitheater", "Sauna"];
     const amenity = String(payload.amenity || "").trim();
     const date = String(payload.date || "").trim();
-    const slot = String(payload.slot || "Full Day").trim();
+    const slot = String(payload.slot || "Full day").trim();
     const flat = String(payload.flat || "").trim();
     const floor = String(payload.floor || "").trim();
     const name = String(payload.name || caller.profile.name || "").trim();
     const phone = String(payload.phone || "").trim();
     const notes = String(payload.notes || "").trim();
-    const AMENITY_FEES = { "Party Hall": 2500, "Movie Theater": 2500, "Sauna": 1500 };
-    const fee = AMENITY_FEES[amenity] || Number(payload.fee) || 2500;
-    if (!amenity || !date || !flat) throw new HttpsError("invalid-argument", "Amenity, date, and flat number are required.");
+    const AMENITY_FEES = { "Party Hall": 2500, "Amphitheater": 2500, "Sauna": 1500 };
+    const fee = AMENITY_FEES[amenity] || Number(payload.fee) || 0;
+    if (!AMENITIES.includes(amenity) || !date || !flat) throw new HttpsError("invalid-argument", "Choose an amenity, date, and flat number.");
+
+    // Slot-clash guard: a slot already taken for this amenity+date can't be re-booked.
+    const requested = slot.split(",").map((s) => s.trim()).filter(Boolean);
+    const existingSnap = await db.collection("amenityBookings").where("amenity", "==", amenity).where("date", "==", date).get();
+    const active = existingSnap.docs.map((d) => d.data()).filter((b) => !["Rejected", "Cancelled"].includes(String(b.status || "")));
+    const takenTokens = new Set();
+    let fullDayTaken = false;
+    active.forEach((b) => {
+      const toks = String(b.slot || "").split(",").map((s) => s.trim());
+      if (toks.includes("Full day")) fullDayTaken = true;
+      toks.forEach((t) => takenTokens.add(t));
+    });
+    const clashes = requested.some((r) => (r === "Full day" ? active.length > 0 : (fullDayTaken || takenTokens.has(r))));
+    if (clashes) throw new HttpsError("failed-precondition", "One or more of those time slots are already booked for that date. Please pick a free slot.");
+
+    // For testing (no association / payment yet) bookings are CONFIRMED immediately — no
+    // committee approval. TODO: when the association enforces a fee, hold as "Pending
+    // payment" and only flip to Confirmed once payment to the association is recorded.
     const ref = db.collection("amenityBookings").doc();
-    const booking = { id: ref.id, amenity, date, slot, flat, floor, name, phone, notes, fee, status: "Requested", requestedBy: caller.email, createdAt: admin.firestore.FieldValue.serverTimestamp() };
+    const booking = { id: ref.id, amenity, date, slot, flat, floor, name, phone, notes, fee, status: "Confirmed", requestedBy: caller.email, createdAt: admin.firestore.FieldValue.serverTimestamp() };
     await ref.set(booking);
-    await writeAudit("Requested amenity booking", "Amenity", `${amenity} · ${date} · Flat ${flat} · ₹${fee}`, caller);
+    await writeAudit("Booked amenity", "Amenity", `${amenity} · ${date} · ${slot} · Flat ${flat}`, caller);
+    // The whole community is notified that a slot is now taken.
+    await notifyRecipients(await allResidentEmails(), { type: "amenity", title: `${amenity} booked`, body: `${amenity} on ${date} (${slot}) — booked by Flat ${flat}.` });
     return { id: ref.id };
   }
   if (action === "updateAmenityBooking") {
