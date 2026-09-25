@@ -873,17 +873,29 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     const existing = await residentRef.get();
     const before = existing.data() || {};
     
-    // Permission check: Admins/Committee can edit any flat. Only a verified
-    // Homeowner can edit their own flat's full profile. Tenants and other
-    // residents cannot full-edit (they get vehicle-only access elsewhere).
+    // Permission check: Admins/Committee edit any flat's full profile; a verified
+    // Homeowner edits their own flat's full profile; a verified Tenant may edit ONLY
+    // their own tenant contact block (owner/flat fields are stripped below).
     const isAdmin = [...ADMIN_ROLES, "committee"].includes(caller.profile.role);
     const callerEmail = String(caller.email || "").trim().toLowerCase();
+    const callerFlatMatch = String(caller.profile.flat || "").trim().toUpperCase() === flat.toUpperCase();
     const ownerEmails = [before.ownerEmail, before.ownerPrimaryEmail, before.ownerSecondaryEmail].map((e) => String(e || "").trim().toLowerCase()).filter(Boolean);
+    const tenantEmails = [before.tenantEmail, before.tenantPrimaryEmail, before.tenantSecondaryEmail].map((e) => String(e || "").trim().toLowerCase()).filter(Boolean);
     const isOwner = ownerEmails.includes(callerEmail)
-      || (String(caller.profile.residentType || "").toLowerCase() === "owner" && String(caller.profile.flat || "").trim().toUpperCase() === flat.toUpperCase());
+      || (String(caller.profile.residentType || "").toLowerCase() === "owner" && callerFlatMatch);
+    const isTenant = tenantEmails.includes(callerEmail)
+      || (String(caller.profile.residentType || "").toLowerCase() === "tenant" && callerFlatMatch);
 
-    if (!isAdmin && !isOwner) {
-      throw new HttpsError("permission-denied", "Only the verified Homeowner of this flat or an Administrator can update flat details.");
+    if (!isAdmin && !isOwner && !isTenant) {
+      throw new HttpsError("permission-denied", "Only the verified Homeowner or Tenant of this flat, or an Administrator, can update flat details.");
+    }
+    // A tenant-only editor may touch tenant + family-contact fields only — never
+    // owner, occupancy, parking or vehicle data. Strip those from the payload so the
+    // merge-safe defaults below preserve the committee-verified owner record.
+    if (!isAdmin && !isOwner && isTenant) {
+      for (const k of ["ownerName", "ownerMobile", "phone", "ownerEmail", "ownerPrimaryEmail", "ownerSecondaryEmail", "ownerPhotoUrl", "occupancy", "subStatus", "parkingAllocation", "parkingLevel", "parkingSlots", "vehicles", "isOutstation", "caretakerName", "caretakerMobile", "caretakerRelation"]) {
+        delete payload[k];
+      }
     }
 
     const rawOccupancy = String(payload.occupancy || "").trim();
