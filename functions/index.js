@@ -2111,15 +2111,27 @@ function ticketFlatKey(flat) {
   return s || "COMMON";
 }
 
-async function nextTicketId(flatKey) {
-  const counterRef = db.collection("ticketCounters").doc(flatKey);
+// A single global, first-in-first-out complaint sequence (POH-0001, POH-0002, …),
+// not a per-flat sequence. The flat is still recorded on the ticket (flatKey) for
+// visibility; only the human-facing number is community-wide.
+async function nextTicketId() {
+  const counterRef = db.collection("ticketCounters").doc("global");
   let seq = 1;
   await db.runTransaction(async (tx) => {
     const snap = await tx.get(counterRef);
-    seq = Number(snap.data() && snap.data().seq || 0) + 1;
+    seq = Number((snap.data() && snap.data().seq) || 0) + 1;
     tx.set(counterRef, { seq, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
   });
-  return `POH-${flatKey}-${String(seq).padStart(4, "0")}`;
+  return `POH-${String(seq).padStart(4, "0")}`;
+}
+
+/** All resident-facing emails registered on a flat (owners, tenants, family contact). */
+async function flatResidentEmails(flat) {
+  const snap = await db.collection("residents").doc(String(flat)).get();
+  if (!snap.exists) return [];
+  const r = snap.data() || {};
+  return [r.ownerEmail, r.ownerPrimaryEmail, r.ownerSecondaryEmail, r.tenantEmail, r.tenantPrimaryEmail, r.tenantSecondaryEmail, r.familyContactEmail]
+    .map((e) => String(e || "").trim().toLowerCase()).filter(Boolean);
 }
 
 async function ticketManagerEmails() {
@@ -2249,7 +2261,7 @@ exports.ticketHub = onCall({ region: "asia-south1" }, async (request) => {
     const onBehalf = Boolean(isManager && String(payload.onBehalfFlat || "").trim() && !scopeCommon);
     const flatKey = ticketFlatKey(flat);
     const floor = flat === "COMMON" ? "Common" : String(flat).replace(/^0+/, "").charAt(0).toUpperCase();
-    const id = await nextTicketId(flatKey);
+    const id = await nextTicketId();
     const now = admin.firestore.FieldValue.serverTimestamp();
     const ticket = {
       id, flat: flat.toUpperCase(), floor, flatKey,
@@ -2263,8 +2275,15 @@ exports.ticketHub = onCall({ region: "asia-south1" }, async (request) => {
     };
     await db.collection("tickets").doc(id).set(ticket);
     await writeAudit("Raised complaint", "Ticket", `${id} · ${category} · ${title}`, caller);
-    await notifyRecipients(await ticketManagerEmails(), { type: "ticket_new", ticketId: id, title: `New complaint ${id}`, body: `${category} (${priority}) from ${ticket.flat}: ${title}` });
-    await notifyRecipients([caller.email, residentEmail], { type: "ticket_ack", ticketId: id, title: `Complaint ${id} raised`, body: `We've logged your ${category.toLowerCase()} complaint. You'll be notified as it progresses.` });
+    if (scopeCommon) {
+      // Common-area complaint → the whole community is notified (and can see it).
+      const everyone = [...(await allResidentEmails()), ...(await ticketManagerEmails())];
+      await notifyRecipients(everyone, { type: "ticket_new", ticketId: id, title: `Common-area complaint ${id}`, body: `${category} (${priority}): ${title}` });
+    } else {
+      // Flat-specific → managers, plus that flat's residents (owners/tenants/family).
+      await notifyRecipients(await ticketManagerEmails(), { type: "ticket_new", ticketId: id, title: `New complaint ${id}`, body: `${category} (${priority}) from ${ticket.flat}: ${title}` });
+      await notifyRecipients(await flatResidentEmails(flat), { type: "ticket_ack", ticketId: id, title: `Complaint ${id} raised`, body: `We've logged the ${category.toLowerCase()} complaint for ${ticket.flat}. You'll be notified as it progresses.` });
+    }
     return { id };
   }
 
@@ -2275,7 +2294,8 @@ exports.ticketHub = onCall({ region: "asia-south1" }, async (request) => {
       if (payload.status && TICKET_STATUSES.includes(payload.status)) query = query.where("status", "==", payload.status);
     } else {
       const flat = ticketFlatKey(await resolveCallerFlat(caller));
-      query = query.where("flatKey", "==", flat);
+      // Residents see their own flat's complaints and every common-area complaint.
+      query = query.where("flatKey", "in", [flat, "COMMON"]);
     }
     const snap = await query.get();
     const items = snap.docs
@@ -2292,7 +2312,7 @@ exports.ticketHub = onCall({ region: "asia-south1" }, async (request) => {
     const d = snap.data();
     const ownFlat = ticketFlatKey(await resolveCallerFlat(caller));
     const isOwner = String(d.raisedByEmail || "").trim().toLowerCase() === callerEmailLower || d.flatKey === ownFlat;
-    if (!isManager && !isOwner) throw new HttpsError("permission-denied", "You can only view your own complaints.");
+    if (!isManager && !isOwner && d.flatKey !== "COMMON") throw new HttpsError("permission-denied", "You can only view your own complaints.");
     const commentsSnap = await db.collection("tickets").doc(id).collection("comments").orderBy("createdAt", "asc").get();
     const comments = commentsSnap.docs
       .map((c) => c.data())
@@ -2352,7 +2372,7 @@ exports.ticketHub = onCall({ region: "asia-south1" }, async (request) => {
     const d = snap.data();
     const ownFlat = ticketFlatKey(await resolveCallerFlat(caller));
     const isOwner = String(d.raisedByEmail || "").trim().toLowerCase() === callerEmailLower || d.flatKey === ownFlat;
-    if (!isManager && !isOwner) throw new HttpsError("permission-denied", "You can only comment on your own complaints.");
+    if (!isManager && !isOwner && d.flatKey !== "COMMON") throw new HttpsError("permission-denied", "You can only comment on your own complaints.");
     await ref.collection("comments").add({ authorEmail: caller.email, authorName: caller.profile.name || caller.email, authorRole: caller.profile.role || "resident", text, internal, createdAt: admin.firestore.FieldValue.serverTimestamp() });
     await ref.set({ commentCount: admin.firestore.FieldValue.increment(1), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     await writeAudit("Commented on complaint", "Ticket", `${id}${internal ? " (internal)" : ""}`, caller);
