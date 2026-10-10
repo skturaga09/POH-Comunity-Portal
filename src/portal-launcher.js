@@ -643,6 +643,16 @@ function renderHome() {
   byId("committeeGrid").innerHTML = visibleCommittee.length ? visibleCommittee.map((member) => `<article class="committee-card">${member.photoUrl ? `<img src="${escapeHtml(safeUrl(member.photoUrl))}" alt="">` : `<span class="monogram">${escapeHtml(String(member.name || "P").charAt(0))}</span>`}<div><strong>${escapeHtml(textOr(member.name, "Committee member"))}</strong><small>${escapeHtml(textOr(member.role, "Committee member"))}</small></div></article>`).join("") : empty("Committee details will be shared once the association is finalised.");
 }
 
+// Current events first (Active, then Planning/Upcoming, soonest date first); settled,
+// closed and completed events separately, newest first.
+function splitEvents() {
+  const stage = (event) => (/^active$/i.test(eventStatus(event)) ? 0 : 1);
+  const when = (event) => Date.parse(event.date || event.eventDate || event.startDate || "") || 0;
+  return {
+    current: portalData.events.filter((event) => !isClosed(event)).sort((a, b) => stage(a) - stage(b) || when(a) - when(b)),
+    past: portalData.events.filter(isClosed).sort((a, b) => when(b) - when(a))
+  };
+}
 function renderEvents() {
   byId("eventsPoolBanner").innerHTML = `<span>Community common pool</span><strong>${money(portalData.commonPool)}</strong><small>Available to approved future event budgets</small>`;
   const card = (event) => {
@@ -661,12 +671,7 @@ function renderEvents() {
       : `<button class="solid-button" type="button" data-open-event="${escapeHtml(event.id)}" style="background:#42605a;border-color:#42605a;"><i class="fa-solid fa-eye" style="margin-right:6px;" aria-hidden="true"></i> View dashboard (${escapeHtml(eventStatus(event))})</button>`;
     return `<article class="event-card"><div class="event-card-top"><span class="state-pill">${escapeHtml(eventStatus(event))}</span><i class="fa-solid fa-calendar-days" aria-hidden="true"></i></div><h3>${escapeHtml(eventTitle(event))}</h3><p>${escapeHtml(textOr(event.description, "A shared community celebration."))}</p><small class="event-date"><i class="fa-regular fa-calendar" aria-hidden="true"></i> ${escapeHtml(eventDetail(event))} · Suggested: ₹${event.contributionAmount || 500}/flat</small><div class="event-finance"><span>Contributions <strong>${money(finance.collected)}</strong></span><span>Pool in use <strong>${money(poolAllocated)}</strong></span><span>Spent <strong>${money(finance.spent)}</strong></span><span class="${balance < 0 ? "negative" : ""}">Available <strong>${money(balance)}</strong></span></div>${actionBtn}</article>`;
   };
-  // Current events first (Active, then Planning/Upcoming, soonest date first); settled,
-  // closed and completed events go to their own section below, newest first.
-  const stage = (event) => (/^active$/i.test(eventStatus(event)) ? 0 : 1);
-  const when = (event) => Date.parse(event.date || event.eventDate || event.startDate || "") || 0;
-  const current = portalData.events.filter((event) => !isClosed(event)).sort((a, b) => stage(a) - stage(b) || when(a) - when(b));
-  const past = portalData.events.filter(isClosed).sort((a, b) => when(b) - when(a));
+  const { current, past } = splitEvents();
   const pastSection = past.length ? `<section class="events-past"><h3 class="events-past-title"><i class="fa-solid fa-box-archive" aria-hidden="true"></i> Completed &amp; closed events <span>${past.length}</span></h3><div class="event-grid">${past.map(card).join("")}</div></section>` : "";
   byId("eventGrid").innerHTML = portalData.events.length
     ? (current.map(card).join("") || empty("No upcoming or active events right now.")) + pastSection
@@ -1027,7 +1032,7 @@ function renderAdmin() {
   const vehicleStat = byId("adminVehicleCount");
   if (vehicleStat) vehicleStat.textContent = `${flatsWithVehicles}/${portalData.residents.length}`;
   renderVehicleRegister();
-  byId("adminEventList").innerHTML = portalData.events.length ? portalData.events.map((event) => {
+  const adminEventRow = (event) => {
     const closed = isClosed(event);
     const active = event.active || /^active$/i.test(eventStatus(event));
     const canActivate = directoryEditorRoles.has(approvedProfile?.role) && !closed && !active;
@@ -1045,7 +1050,11 @@ function renderAdmin() {
     const completeBtn = canComplete ? `<button class="admin-event-complete" data-complete-event="${escapeHtml(event.id)}" type="button" style="background:#8c6110;color:#fff;border:0;padding:8px 11px;border-radius:4px;font-size:12px;font-weight:800;cursor:pointer;margin-left:6px;"><i class="fa-solid fa-flag-checkered" aria-hidden="true"></i> Mark Completed</button>` : "";
 
     return `<li class="admin-event-row"><div><strong>${escapeHtml(eventTitle(event))}</strong><span>${escapeHtml(eventStatus(event))}${amountStr}${event.date ? ` · ${escapeHtml(eventDetail(event))}` : ""}</span></div><div style="display:flex;align-items:center;">${statusBadge}${editBtn}${activateBtn}${completeBtn}</div></li>`;
-  }).join("") : "<li>No events available</li>";
+  };
+  const { current: currentEvents, past: pastEvents } = splitEvents();
+  byId("adminEventList").innerHTML = portalData.events.length
+    ? currentEvents.map(adminEventRow).join("") + (pastEvents.length ? `<li class="admin-event-divider"><i class="fa-solid fa-box-archive" aria-hidden="true"></i> Completed &amp; closed events <span>${pastEvents.length}</span></li>${pastEvents.map(adminEventRow).join("")}` : "")
+    : "<li>No events available</li>";
   byId("adminRoleBadge").textContent = roleLabel(approvedProfile?.role || "administrator");
   switchAdminWorkspace(currentAdminWorkspace);
   renderDirectoryActionItems();
