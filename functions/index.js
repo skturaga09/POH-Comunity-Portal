@@ -921,888 +921,959 @@ exports.portalAccess = onCall({ region: "asia-south1" }, async (request) => {
   throw new HttpsError("invalid-argument", "Unknown portal-access action.");
 });
 
+// adminConsole actions, one named handler each (dispatched by name below).
+async function saveResidentProfile({ caller, payload }) {
+  const flat = String(payload.flat || "").trim();
+  if (!flat) throw new HttpsError("invalid-argument", "Flat number is required.");
+  const residentRef = db.collection("residents").doc(flat);
+  const existing = await residentRef.get();
+  const before = existing.data() || {};
+  
+  // Permission check: Admins/Committee edit any flat's full profile; a verified
+  // Homeowner edits their own flat's full profile; a verified Tenant may edit ONLY
+  // their own tenant contact block (owner/flat fields are stripped below).
+  const isAdmin = DIRECTORY_EDITOR_ROLES.includes(caller.profile.role);
+  const callerEmail = String(caller.email || "").trim().toLowerCase();
+  const callerFlatMatch = String(caller.profile.flat || "").trim().toUpperCase() === flat.toUpperCase();
+  const ownerEmails = [before.ownerEmail, before.ownerPrimaryEmail, before.ownerSecondaryEmail].map((e) => String(e || "").trim().toLowerCase()).filter(Boolean);
+  const tenantEmails = [before.tenantEmail, before.tenantPrimaryEmail, before.tenantSecondaryEmail].map((e) => String(e || "").trim().toLowerCase()).filter(Boolean);
+  const isOwner = ownerEmails.includes(callerEmail)
+    || (String(caller.profile.residentType || "").toLowerCase() === "owner" && callerFlatMatch);
+  const isTenant = tenantEmails.includes(callerEmail)
+    || (String(caller.profile.residentType || "").toLowerCase() === "tenant" && callerFlatMatch);
+
+  if (!isAdmin && !isOwner && !isTenant) {
+    throw new HttpsError("permission-denied", "Only the verified Homeowner or Tenant of this flat, or an Administrator, can update flat details.");
+  }
+  // A tenant-only editor may touch tenant + family-contact fields only — never
+  // owner, occupancy, parking or vehicle data. Strip those from the payload so the
+  // merge-safe defaults below preserve the committee-verified owner record.
+  if (!isAdmin && !isOwner && isTenant) {
+    for (const k of ["ownerName", "ownerMobile", "phone", "ownerEmail", "ownerPrimaryEmail", "ownerSecondaryEmail", "ownerPhotoUrl", "occupancy", "subStatus", "parkingAllocation", "parkingLevel", "parkingSlots", "vehicles", "isOutstation", "caretakerName", "caretakerMobile", "caretakerRelation"]) {
+      delete payload[k];
+    }
+  }
+
+  const rawOccupancy = String(payload.occupancy || "").trim();
+  const validOccupancies = ["Owner occupied", "Tenant occupied", "Unoccupied (Owner Owned)", "Vacant", "Unverified"];
+  // Preserve the stored value whenever the caller omits a field, so a partial /
+  // self-service update (e.g. a phone-only save from the app) never blanks
+  // occupancy, family-contact, tenant or caretaker data. The web app always sends
+  // the full payload, so its behaviour is unchanged.
+  const occupancy = rawOccupancy
+    ? (validOccupancies.find(o => o.toLowerCase() === rawOccupancy.toLowerCase()) || "Unverified")
+    : (before.occupancy || before.occupancyStatus || "Unverified");
+
+  const subStatus = payload.subStatus !== undefined ? String(payload.subStatus || "").trim() : String(before.subStatus || "").trim();
+  const resolvedOwnerName = String(payload.ownerName || before.ownerName || before.name || "").trim();
+  const resolvedTenantName = payload.tenantName !== undefined ? String(payload.tenantName || "").trim() : String(before.tenantName || "").trim();
+  const ownerPrimaryEmail = payload.ownerPrimaryEmail !== undefined ? String(payload.ownerPrimaryEmail || "").trim().toLowerCase() : (payload.ownerEmail !== undefined ? String(payload.ownerEmail || "").trim().toLowerCase() : (before.ownerPrimaryEmail || before.ownerEmail || ""));
+  const ownerSecondaryEmail = payload.ownerSecondaryEmail !== undefined ? String(payload.ownerSecondaryEmail || "").trim().toLowerCase() : (before.ownerSecondaryEmail || "");
+  const tenantPrimaryEmail = payload.tenantPrimaryEmail !== undefined ? String(payload.tenantPrimaryEmail || "").trim().toLowerCase() : (payload.tenantEmail !== undefined ? String(payload.tenantEmail || "").trim().toLowerCase() : (before.tenantPrimaryEmail || before.tenantEmail || ""));
+  const tenantSecondaryEmail = payload.tenantSecondaryEmail !== undefined ? String(payload.tenantSecondaryEmail || "").trim().toLowerCase() : (before.tenantSecondaryEmail || "");
+  const ownerEmail = ownerPrimaryEmail;
+  const tenantEmail = tenantPrimaryEmail;
+
+  if (occupancy === "Owner occupied" && !resolvedOwnerName) throw new HttpsError("invalid-argument", "Enter the owner name for an owner-occupied flat.");
+  if (occupancy === "Tenant occupied" && !resolvedTenantName) throw new HttpsError("invalid-argument", "Enter the tenant name for a tenant-occupied flat.");
+  
+  const parkingAllocation = ["", "Single car parking", "Double car parking"].includes(String(payload.parkingAllocation || "")) ? String(payload.parkingAllocation || "") : (before.parkingAllocation || "");
+  const parkingLevel = ["", "B1", "B2"].includes(String(payload.parkingLevel || "").toUpperCase()) ? String(payload.parkingLevel || "").toUpperCase() : (before.parkingLevel || "");
+  const parkingSlots = payload.parkingSlots !== undefined ? String(payload.parkingSlots || "").trim() : (before.parkingSlots || "");
+  const vehicles = Array.isArray(payload.vehicles) ? payload.vehicles.map((item) => ({ type: ["Two wheeler", "Four wheeler"].includes(item.type) ? item.type : "Two wheeler", details: String(item.details || "").trim().toUpperCase() })).filter((item) => item.details) : (before.vehicles || []);
+  // Parking is not yet allotted by the builder, so residents can record vehicle
+  // details without a parking allocation. Slot data stays optional.
+
+  const ownerPhotoUrl = String(payload.ownerPhotoUrl || "").trim();
+  if (ownerPhotoUrl && !/^https:\/\//i.test(ownerPhotoUrl)) throw new HttpsError("invalid-argument", "The owner photo link is not valid.");
+
+  const next = {
+    flat,
+    flatNo: flat,
+    floor: before.floor || String(flat.slice(0, 1)).toUpperCase(),
+    occupancy,
+    occupancyStatus: occupancy,
+    subStatus,
+    ownerEmail,
+    ownerPrimaryEmail,
+    ownerSecondaryEmail,
+    tenantEmail,
+    tenantPrimaryEmail,
+    tenantSecondaryEmail,
+    familyContactName: payload.familyContactName !== undefined ? String(payload.familyContactName || "").trim() : String(before.familyContactName || "").trim(),
+    familyContactMobile: (payload.familyContactMobile !== undefined || payload.familyContactPhone !== undefined) ? String(payload.familyContactMobile || payload.familyContactPhone || "").trim() : String(before.familyContactMobile || before.familyContactPhone || "").trim(),
+    familyContactPhone: (payload.familyContactMobile !== undefined || payload.familyContactPhone !== undefined) ? String(payload.familyContactMobile || payload.familyContactPhone || "").trim() : String(before.familyContactPhone || before.familyContactMobile || "").trim(),
+    familyContactEmail: payload.familyContactEmail !== undefined ? String(payload.familyContactEmail || "").trim().toLowerCase() : String(before.familyContactEmail || "").trim().toLowerCase(),
+    familyContactRelation: payload.familyContactRelation !== undefined ? String(payload.familyContactRelation || "").trim() : String(before.familyContactRelation || "").trim(),
+    ownerName: resolvedOwnerName,
+    phone: String(payload.ownerMobile || payload.phone || before.phone || before.ownerMobile || "").trim(),
+    ownerMobile: String(payload.ownerMobile || payload.phone || before.ownerMobile || before.phone || "").trim(),
+    tenantName: resolvedTenantName,
+    tenantMobile: payload.tenantMobile !== undefined ? String(payload.tenantMobile || "").trim() : String(before.tenantMobile || "").trim(),
+    isOutstation: payload.isOutstation !== undefined ? Boolean(payload.isOutstation) : Boolean(before.isOutstation),
+    caretakerName: payload.caretakerName !== undefined ? String(payload.caretakerName || "").trim() : String(before.caretakerName || "").trim(),
+    caretakerMobile: payload.caretakerMobile !== undefined ? String(payload.caretakerMobile || "").trim() : String(before.caretakerMobile || "").trim(),
+    caretakerRelation: payload.caretakerRelation !== undefined ? String(payload.caretakerRelation || "").trim() : String(before.caretakerRelation || "").trim(),
+    parkingAllocation,
+    parkingLevel,
+    parkingSlots,
+    vehicles,
+    updatedBy: caller.email,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+  if (ownerPhotoUrl) { next.ownerPhotoUrl = ownerPhotoUrl; next.photoUrl = ownerPhotoUrl; }
+  
+  await residentRef.set(next, { merge: true });
+  
+  const parkingChanged = ["parkingAllocation", "parkingLevel", "parkingSlots", "vehicles"].some((key) => JSON.stringify(before[key] || "") !== JSON.stringify(next[key] || ""));
+  if (parkingChanged) await db.collection("parkingAuditLogs").add({ flat, actor: caller.email, previous: { parkingAllocation: before.parkingAllocation || "", parkingLevel: before.parkingLevel || "", parkingSlots: before.parkingSlots || "", vehicles: before.vehicles || [] }, updated: { parkingAllocation, parkingLevel, parkingSlots, vehicles }, createdAt: admin.firestore.FieldValue.serverTimestamp() });
+
+  // Auto-grant resident portal access for every owner/tenant email on this flat.
+  const grantedAccess = await syncDirectoryAccess([
+    { email: ownerPrimaryEmail, name: next.ownerName, residentType: "Owner", flat },
+    { email: ownerSecondaryEmail, name: next.ownerName, residentType: "Owner", flat },
+    { email: tenantPrimaryEmail, name: next.tenantName, residentType: "Tenant", flat },
+    { email: tenantSecondaryEmail, name: next.tenantName, residentType: "Tenant", flat }
+  ]);
+
+  await bumpDirectoryVersion();
+  await writeAudit("Updated resident profile", "Resident", `${flat} · ${occupancy}${subStatus ? ` (${subStatus})` : ""}${grantedAccess.length ? ` · access: ${grantedAccess.length}` : ""}`, caller);
+  // Notify the flat's residents that their profile was changed (skip the editor,
+  // so a resident's own self-service edit doesn't ping themselves).
+  const callerLower = String(caller.email || "").trim().toLowerCase();
+  const flatContacts = [ownerPrimaryEmail, ownerSecondaryEmail, tenantPrimaryEmail, tenantSecondaryEmail, next.familyContactEmail]
+    .filter(Boolean).filter((e) => String(e).toLowerCase() !== callerLower);
+  await notifyRecipients(flatContacts, { type: "profile_update", title: "Your flat profile was updated", body: `${flat} details were updated by ${caller.profile.name || "the committee"}.` });
+  return { ok: true, accessGranted: grantedAccess.length };
+}
+
+async function updateOwnVehicles({ caller, payload }) {
+  // Vehicle-only self-service: any active resident tied to the flat (owner,
+  // tenant, or family email, or a matching profile flat) may update the
+  // vehicle list. No other flat fields can be changed through this path.
+  ensureActive(caller.profile);
+  const flat = String(payload.flat || "").trim();
+  if (!flat) throw new HttpsError("invalid-argument", "Flat number is required.");
+  const residentRef = db.collection("residents").doc(flat);
+  const snap = await residentRef.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Flat not found.");
+  const before = snap.data() || {};
+  const callerEmail = String(caller.email || "").trim().toLowerCase();
+  const flatEmails = [before.ownerEmail, before.ownerPrimaryEmail, before.ownerSecondaryEmail, before.tenantEmail, before.tenantPrimaryEmail, before.tenantSecondaryEmail, before.familyContactEmail].map((e) => String(e || "").trim().toLowerCase()).filter(Boolean);
+  const isStaff = DIRECTORY_EDITOR_ROLES.includes(caller.profile.role);
+  const belongsToFlat = flatEmails.includes(callerEmail) || String(caller.profile.flat || "").trim().toUpperCase() === flat.toUpperCase();
+  if (!isStaff && !belongsToFlat) throw new HttpsError("permission-denied", "You can only update the vehicles for your own flat.");
+  const vehicles = Array.isArray(payload.vehicles) ? payload.vehicles.map((item) => ({ type: ["Two wheeler", "Four wheeler"].includes(item.type) ? item.type : "Two wheeler", details: String(item.details || "").trim().toUpperCase() })).filter((item) => item.details) : [];
+  await residentRef.set({ vehicles, updatedBy: caller.email, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  if (JSON.stringify(before.vehicles || []) !== JSON.stringify(vehicles)) {
+    await db.collection("parkingAuditLogs").add({ flat, actor: caller.email, previous: { vehicles: before.vehicles || [] }, updated: { vehicles }, createdAt: admin.firestore.FieldValue.serverTimestamp() });
+  }
+  await bumpDirectoryVersion();
+  await writeAudit("Updated own vehicle details", "Directory", `${flat} · ${vehicles.length} vehicle(s)`, caller);
+  return { ok: true, vehicles };
+}
+
+async function recordContribution({ caller, payload }) {
+  ensureActive(caller.profile);
+  const eventId = String(payload.eventId || "");
+  const flat = String(payload.flat || "").trim();
+  const floor = String(payload.floor || "").trim();
+  const name = String(payload.name || "").trim();
+  const paymentMode = String(payload.paymentMode || "").trim();
+  const reference = String(payload.reference || "").replace(/\s+/g, "");
+  const amount = Number(payload.amount || 0);
+  const contributorType = String(payload.contributorType || "Owner");
+  const receiptUrls = cleanReceiptUrls(payload.receiptUrls);
+
+  const eventSnap = await db.collection("events").doc(eventId).get();
+  if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
+  const eventData = eventSnap.data();
+
+  if (!eventId || !flat || !floor || !name) throw new HttpsError("invalid-argument", "Select a floor and flat before saving this contribution.");
+  if (!["Owner", "Tenant"].includes(contributorType)) throw new HttpsError("invalid-argument", "Choose whether the owner or the tenant paid.");
+  // Amount is now free-form (variable) — the SPOC enters what was collected.
+  if (!Number.isFinite(amount) || amount <= 0) throw new HttpsError("invalid-argument", "Enter a valid contribution amount.");
+  if (!["UPI", "Cash", "Bank Transfer"].includes(paymentMode)) throw new HttpsError("invalid-argument", "Choose a valid payment mode.");
+  if (paymentMode !== "Cash" && !reference) throw new HttpsError("invalid-argument", "Enter the UPI or bank transaction reference.");
+  if (isClosedEventData(eventData)) throw new HttpsError("failed-precondition", "This event is settled and closed; contributions can no longer be added.");
+
+  // Access: floor SPOC (own floor) or admin/committee (any floor). Multiple
+  // contributions per flat are allowed — no duplicate block.
+  await assertCanManageContribution(caller, eventData, floor);
+  if (contributorType === "Tenant") await assertTenantOccupied(flat);
+  await assertUniqueReference(eventId, paymentMode, reference, null);
+
+  const contributionRef = db.collection("events").doc(eventId).collection("contributions").doc();
+  await contributionRef.set({ id: contributionRef.id, eventId, floor, flat, name, contributorType, amount, paymentMode, reference, receiptUrls, status: "Received", date: normalizeContributionDate(payload.date), createdAt: FIELD_VALUE.serverTimestamp(), recordedBy: caller.email });
+  await writeAudit("Recorded contribution", "Contribution", `${flat} · ${String(eventData.name || eventId)} · ₹${Math.round(amount)}`, caller);
+  return { id: contributionRef.id, amount };
+}
+
+async function editContribution({ caller, payload }) {
+  ensureActive(caller.profile);
+  const eventId = String(payload.eventId || "");
+  const contributionId = String(payload.contributionId || "");
+  if (!eventId || !contributionId) throw new HttpsError("invalid-argument", "Event ID and contribution ID are required.");
+  const eventSnap = await db.collection("events").doc(eventId).get();
+  if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
+  const eventData = eventSnap.data();
+  if (isClosedEventData(eventData)) throw new HttpsError("failed-precondition", "This event is settled and closed; its contributions can no longer be edited.");
+  const ref = db.collection("events").doc(eventId).collection("contributions").doc(contributionId);
+  const snap = await ref.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Contribution not found.");
+  const before = snap.data();
+  await assertCanManageContribution(caller, eventData, String(before.floor || "").trim());
+  const updates = { updatedBy: caller.email, updatedAt: FIELD_VALUE.serverTimestamp() };
+  if (payload.amount !== undefined) {
+    const amt = Number(payload.amount);
+    if (!Number.isFinite(amt) || amt <= 0) throw new HttpsError("invalid-argument", "Enter a valid contribution amount.");
+    updates.amount = amt;
+  }
+  if (payload.name !== undefined) updates.name = String(payload.name || "").trim();
+  if (payload.contributorType !== undefined) {
+    if (!["Owner", "Tenant"].includes(payload.contributorType)) throw new HttpsError("invalid-argument", "Choose whether the owner or the tenant paid.");
+    if (payload.contributorType === "Tenant" && before.contributorType !== "Tenant") await assertTenantOccupied(before.flat);
+    updates.contributorType = payload.contributorType;
+  }
+  if (payload.paymentMode !== undefined) {
+    if (!["UPI", "Cash", "Bank Transfer"].includes(payload.paymentMode)) throw new HttpsError("invalid-argument", "Choose a valid payment mode.");
+    updates.paymentMode = payload.paymentMode;
+  }
+  if (payload.reference !== undefined) updates.reference = String(payload.reference || "").replace(/\s+/g, "");
+  if (payload.receiptUrls !== undefined) updates.receiptUrls = cleanReceiptUrls(payload.receiptUrls);
+  if (updates.reference && updates.reference !== before.reference) await assertUniqueReference(eventId, updates.paymentMode || before.paymentMode, updates.reference, contributionId);
+  if (payload.date !== undefined && String(payload.date).trim()) updates.date = normalizeContributionDate(payload.date);
+  await ref.set(updates, { merge: true });
+  await writeAudit("Edited contribution", "Contribution", `${before.flat} · ${String(eventData.name || eventId)} · ₹${Math.round(updates.amount ?? before.amount ?? 0)}`, caller);
+  return { ok: true };
+}
+
+async function deleteContribution({ caller, payload }) {
+  ensureActive(caller.profile);
+  const eventId = String(payload.eventId || "");
+  const contributionId = String(payload.contributionId || "");
+  if (!eventId || !contributionId) throw new HttpsError("invalid-argument", "Event ID and contribution ID are required.");
+  const eventSnap = await db.collection("events").doc(eventId).get();
+  if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
+  const eventData = eventSnap.data();
+  if (isClosedEventData(eventData)) throw new HttpsError("failed-precondition", "This event is settled and closed; its contributions can no longer be removed.");
+  const ref = db.collection("events").doc(eventId).collection("contributions").doc(contributionId);
+  const snap = await ref.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Contribution not found.");
+  const before = snap.data();
+  await assertCanManageContribution(caller, eventData, String(before.floor || "").trim());
+  await ref.delete();
+  await writeAudit("Deleted contribution", "Contribution", `${before.flat} · ${String(eventData.name || eventId)} · ₹${Math.round(before.amount || 0)}`, caller);
+  return { ok: true };
+}
+
+async function recordAdditionalContribution({ caller, payload }) {
+  // Post-settlement "deficit recovery": SPOCs/admins record additional,
+  // VARIABLE-amount top-ups from owners when an event's available balance is
+  // negative. Kept in a separate sub-collection so the fixed-amount /
+  // one-per-flat rules and the frozen settlementFigures are untouched. Repeats
+  // and over-coverage (surplus) are allowed; the common fund is NOT auto-moved
+  // (the treasurer reconciles it).
+  ensureActive(caller.profile);
+  const eventId = String(payload.eventId || "");
+  const flat = String(payload.flat || "").trim();
+  const floor = String(payload.floor || "").trim();
+  const name = String(payload.name || "").trim();
+  const paymentMode = String(payload.paymentMode || "").trim();
+  const reference = String(payload.reference || "").trim();
+  const note = String(payload.note || "").trim();
+  const amount = Number(payload.amount || 0);
+
+  const eventSnap = await db.collection("events").doc(eventId).get();
+  if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
+  const eventData = eventSnap.data();
+
+  if (!eventId || !flat || !floor || !name) throw new HttpsError("invalid-argument", "Select a floor and flat before saving this contribution.");
+  if (!Number.isFinite(amount) || amount <= 0) throw new HttpsError("invalid-argument", "Enter a valid contribution amount.");
+  if (!["UPI", "Cash", "Bank Transfer"].includes(paymentMode)) throw new HttpsError("invalid-argument", "Choose a valid payment mode.");
+  if (paymentMode !== "Cash" && !reference) throw new HttpsError("invalid-argument", "Enter the UPI or bank transaction reference.");
+
+  // Permitted only while the event ran a deficit: available balance (frozen
+  // figures for a closed event, else live) is negative.
+  const figures = (isClosedEventData(eventData) && eventData.settlementFigures) ? eventData.settlementFigures : await eventFigures(eventId);
+  if (Number(figures.balance || 0) >= 0) throw new HttpsError("failed-precondition", "Additional contributions can be recorded only while this event's available balance is negative.");
+
+  // Same access as normal contributions: admin/committee (any floor) or the floor SPOC.
+  await assertCanManageContribution(caller, eventData, floor);
+
+  const ref = db.collection("events").doc(eventId).collection("additionalContributions").doc();
+  await ref.set({ id: ref.id, eventId, floor, flat, name, amount, paymentMode, reference, note, status: "Received", kind: "additional", date: new Date().toISOString(), createdAt: FIELD_VALUE.serverTimestamp(), recordedBy: caller.email });
+  await writeAudit("Recorded additional contribution", "Contribution", `${flat} · ${String(eventData.name || eventId)} · ₹${Math.round(amount)} (deficit recovery)`, caller);
+  return { id: ref.id, amount };
+}
+
+async function recordExpense({ caller, payload }) {
+  ensureActive(caller.profile);
+  const eventId = String(payload.eventId || "");
+  const category = String(payload.category || "").trim();
+  const description = String(payload.description || "").trim();
+  const paidBy = String(payload.paidBy || "").trim();
+  const paymentMode = String(payload.paymentMode || "").trim();
+  const amount = Number(payload.amount || 0);
+  const reference = String(payload.reference || "").trim();
+  const remarks = String(payload.remarks || "").trim();
+  // Support multiple receipts per expense (e.g. an advance plus the balance
+  // paid via different modes). Accepts receiptUrls[] and/or a single receiptUrl.
+  const receiptUrls = [
+    ...(Array.isArray(payload.receiptUrls) ? payload.receiptUrls : []),
+    ...(payload.receiptUrl ? [payload.receiptUrl] : [])
+  ].map((u) => String(u || "").trim()).filter(Boolean);
+  if (!eventId || !category || !description || !paidBy || !amount || amount <= 0) throw new HttpsError("invalid-argument", "Complete the event, category, description, payer, and amount.");
+  if (!["UPI", "Cash", "Bank Transfer"].includes(paymentMode)) throw new HttpsError("invalid-argument", "Choose a valid payment mode.");
+  for (const u of receiptUrls) { if (!/^https:\/\//i.test(u)) throw new HttpsError("invalid-argument", "A receipt link is not valid."); }
+  const receiptUrl = receiptUrls[0] || "";
+  const event = await db.collection("events").doc(eventId).get();
+  if (!event.exists) throw new HttpsError("not-found", "Event not found.");
+  if (isClosedEventData(event.data())) throw new HttpsError("failed-precondition", "This event is settled and closed for new expenses.");
+
+  // Admins, committee members, or any SPOC of this event may submit expenses.
+  if (!DIRECTORY_EDITOR_ROLES.includes(caller.profile.role) && !(await callerSpocFloors(caller, event.data())).length) {
+    throw new HttpsError("permission-denied", "Only a floor SPOC, an administrator, or a committee member can submit expenses for this event.");
+  }
+
+  const expenseRef = db.collection("events").doc(eventId).collection("expenses").doc();
+  await expenseRef.set({ id: expenseRef.id, eventId, category, description, amount, paidBy, paymentMode, reference, remarks, receiptUrl, receiptUrls, status: "Pending", date: new Date().toISOString(), createdAt: admin.firestore.FieldValue.serverTimestamp(), recordedBy: caller.email, submittedBy: caller.profile.name || caller.email });
+  await writeAudit("Submitted expense", "Expense", `${expenseRef.id} · ${String(event.data().name || eventId)} · ₹${Math.round(amount)}`, caller);
+  return { id: expenseRef.id };
+}
+
+async function reviewExpense({ caller, payload }) {
+  ensureRole(caller.profile, FINANCE_ROLES);
+  const { eventId, expenseId, status, adminComment, category, description, amount, paidBy, paymentMode, reference, remarks } = payload;
+  if (!eventId || !expenseId) throw new HttpsError("invalid-argument", "Event ID and Expense ID are required.");
+  if (!["Approved", "Rejected"].includes(status)) throw new HttpsError("invalid-argument", "Status must be Approved or Rejected.");
+  // A settled/closed event's finance is frozen — its expenses can no longer be
+  // edited, approved, or rejected (mirrors the recordExpense closure guard).
+  const eventDoc = await db.collection("events").doc(String(eventId)).get();
+  if (!eventDoc.exists) throw new HttpsError("not-found", "Event not found.");
+  if (isClosedEventData(eventDoc.data())) throw new HttpsError("failed-precondition", "This event is settled and closed; its expenses can no longer be edited.");
+  const expenseRef = db.collection("events").doc(String(eventId)).collection("expenses").doc(String(expenseId));
+  const expenseSnap = await expenseRef.get();
+  if (!expenseSnap.exists) throw new HttpsError("not-found", "Expense not found.");
+  const updates = {
+    status,
+    adminComment: String(adminComment || "").trim(),
+    reviewedBy: caller.email,
+    reviewedAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+  if (category) updates.category = String(category).trim();
+  if (description) updates.description = String(description).trim();
+  if (amount && Number(amount) > 0) updates.amount = Number(amount);
+  if (paidBy) updates.paidBy = String(paidBy).trim();
+  if (paymentMode && ["UPI", "Cash", "Bank Transfer"].includes(paymentMode)) updates.paymentMode = String(paymentMode);
+  if (reference !== undefined) updates.reference = String(reference || "").trim();
+  if (remarks !== undefined) updates.remarks = String(remarks || "").trim();
+  if (payload.receiptUrls !== undefined) {
+    const urls = (Array.isArray(payload.receiptUrls) ? payload.receiptUrls : []).map((u) => String(u || "").trim()).filter(Boolean);
+    for (const u of urls) { if (!/^https:\/\//i.test(u)) throw new HttpsError("invalid-argument", "A receipt link is not valid."); }
+    updates.receiptUrls = urls;
+    updates.receiptUrl = urls[0] || "";
+  } else if (payload.receiptUrl !== undefined) {
+    updates.receiptUrl = String(payload.receiptUrl || "").trim();
+  }
+  await expenseRef.set(updates, { merge: true });
+  await writeAudit(`${status} expense`, "Expense", `${expenseId} · ${status} · ${adminComment || "No comment"}`, caller);
+  return { ok: true };
+}
+
+async function saveEvent({ caller, payload }) {
+  ensureRole(caller.profile, DIRECTORY_EDITOR_ROLES);
+  const eventId = String(payload.id || payload.eventId || "").trim();
+  const name = String(payload.name || "").trim();
+  if (!name) throw new HttpsError("invalid-argument", "Event name is required.");
+  const status = String(payload.status || "Planning in progress");
+  if (!["Planning in progress", "Upcoming", "Active", "Completed"].includes(status)) throw new HttpsError("invalid-argument", "Choose a valid event status.");
+  if (eventId) {
+    const existing = await db.collection("events").doc(eventId).get();
+    if (existing.exists && isSettledEventData(existing.data())) throw new HttpsError("failed-precondition", "This event is settled; it can no longer be edited.");
+  }
+  const contributionAmount = Math.max(1, Number(payload.contributionAmount || 500));
+  const spocs = Array.isArray(payload.spocs) ? payload.spocs.filter((item) => item && item.floor && item.flat).map((item) => {
+    const upiId = String(item.upiId || "").trim();
+    if (upiId && !/^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z][a-zA-Z0-9.\-_]{1,64}$/.test(upiId)) throw new HttpsError("invalid-argument", `Enter a valid UPI ID for the Floor ${item.floor} SPOC, e.g. name@okaxis.`);
+    return { floor: String(item.floor).trim(), flat: String(item.flat).trim(), ...(upiId ? { upiId } : {}) };
+  }) : [];
+  // Up to two distinct SPOCs per floor.
+  const flatsByFloor = new Map();
+  spocs.forEach(({ floor, flat }) => {
+    const flats = flatsByFloor.get(floor) || [];
+    if (flats.includes(flat.toUpperCase())) throw new HttpsError("invalid-argument", `Flat ${flat} is chosen twice as SPOC for Floor ${floor}.`);
+    flats.push(flat.toUpperCase());
+    if (flats.length > 2) throw new HttpsError("invalid-argument", `Floor ${floor} can have at most two SPOCs.`);
+    flatsByFloor.set(floor, flats);
+  });
+  if (/^active$/i.test(status)) {
+    const residentFloors = new Set((await db.collection("residents").get()).docs.map((entry) => String(entry.data().floor || "Unassigned")));
+    const spocFloors = new Set(spocs.map((entry) => String(entry.floor)));
+    if (!residentFloors.size || [...residentFloors].some((floor) => !spocFloors.has(floor))) throw new HttpsError("failed-precondition", "Assign one SPOC for every floor before activating an event.");
+  }
+
+  const eventRef = eventId ? db.collection("events").doc(eventId) : db.collection("events").doc();
+  const isNew = !eventId;
+  const eventData = {
+    id: eventRef.id,
+    name,
+    date: String(payload.date || ""),
+    description: String(payload.description || ""),
+    status,
+    active: /^active$/i.test(status),
+    contributionAmount,
+    spocs,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+  if (isNew) {
+    eventData.createdAt = admin.firestore.FieldValue.serverTimestamp();
+    eventData.createdBy = caller.email;
+    eventData.settlementStatus = "Open";
+    eventData.commonPoolCarryForward = 0;
+  }
+
+  if (/^active$/i.test(status)) {
+    const existingEvents = await db.collection("events").get();
+    const batch = db.batch();
+    existingEvents.docs.forEach((entry) => {
+      // Never demote a completed/closed/settled (past) event back to "Upcoming".
+      if (entry.id === eventRef.id || isClosedEventData(entry.data())) return;
+      batch.set(entry.ref, { active: false, status: "Upcoming", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    });
+    batch.set(eventRef, eventData, { merge: true });
+    await batch.commit();
+  } else {
+    await eventRef.set(eventData, { merge: true });
+  }
+  const auditText = isNew ? "Created event" : "Updated event";
+  await writeAudit(auditText, "Event", `${name} (₹${contributionAmount}/flat)`, caller);
+  return { id: eventRef.id, isNew };
+}
+
+async function activateEvent({ caller, payload }) {
+  ensureRole(caller.profile, DIRECTORY_EDITOR_ROLES);
+  const eventId = String(payload.eventId || "");
+  const eventRef = db.collection("events").doc(eventId);
+  const event = await eventRef.get();
+  if (!event.exists) throw new HttpsError("not-found", "Event not found.");
+  if (isSettledEventData(event.data())) throw new HttpsError("failed-precondition", "A settled or closed event cannot be re-activated.");
+  const residentFloors = new Set((await db.collection("residents").get()).docs.map((entry) => String(entry.data().floor || "Unassigned")));
+  const spocFloors = new Set((Array.isArray(event.data().spocs) ? event.data().spocs : []).filter((entry) => entry?.floor && entry?.flat).map((entry) => String(entry.floor)));
+  if (!residentFloors.size || [...residentFloors].some((floor) => !spocFloors.has(floor))) throw new HttpsError("failed-precondition", "Assign one SPOC for every floor before activating this event.");
+  const events = await db.collection("events").get();
+  const batch = db.batch();
+  events.docs.forEach((entry) => {
+    // Never demote a completed/closed/settled (past) event back to "Upcoming".
+    if (entry.id === eventId || isClosedEventData(entry.data())) return;
+    batch.set(entry.ref, { active: false, status: "Upcoming", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  });
+  batch.set(eventRef, { active: true, status: "Active", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  await batch.commit();
+  await writeAudit("Activated event", "Event", String(event.data().name || eventId), caller);
+  return { ok: true };
+}
+
+async function completeEvent({ caller, payload }) {
+  ensureRole(caller.profile, DIRECTORY_EDITOR_ROLES);
+  const eventId = String(payload.eventId || "");
+  const eventRef = db.collection("events").doc(eventId);
+  const event = await eventRef.get();
+  if (!event.exists) throw new HttpsError("not-found", "Event not found.");
+  await eventRef.set({ status: "Completed", active: false, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  await writeAudit("Marked event as completed", "Event", String(event.data().name || eventId), caller);
+  return { ok: true };
+}
+
+async function saveCommittee({ caller, payload }) {
+  ensureRole(caller.profile, ADMIN_ROLES);
+  const name = String(payload.name || "").trim();
+  if (!name) throw new HttpsError("invalid-argument", "Committee member name is required.");
+  const memberRef = payload.id ? db.collection("committee").doc(String(payload.id)) : db.collection("committee").doc();
+  await memberRef.set({ id: memberRef.id, name, role: String(payload.role || "Committee member"), flat: String(payload.flat || ""), phone: String(payload.phone || ""), email: String(payload.email || ""), photoUrl: String(payload.photoUrl || ""), visible: payload.visible !== false, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  await writeAudit(payload.id ? "Updated committee member" : "Added committee member", "Committee", name, caller);
+  return { id: memberRef.id };
+}
+
+async function deleteCommittee({ caller, payload }) {
+  ensureRole(caller.profile, ADMIN_ROLES);
+  await db.collection("committee").doc(String(payload.id)).delete();
+  await writeAudit("Removed committee member", "Committee", String(payload.name || payload.id), caller);
+  return { ok: true };
+}
+
+async function publishNotice({ caller, payload }) {
+  ensureRole(caller.profile, ADMIN_ROLES);
+  const title = String(payload.title || "").trim();
+  if (!title) throw new HttpsError("invalid-argument", "Notice title is required.");
+  const noticeRef = db.collection("notices").doc();
+  await noticeRef.set({ id: noticeRef.id, title, body: String(payload.body || ""), type: String(payload.type || "Update"), priority: String(payload.priority || "Normal"), expiresAt: String(payload.expiresAt || ""), published: true, publishedAt: admin.firestore.FieldValue.serverTimestamp(), publishedBy: caller.email });
+  await writeAudit("Published notice", "Notice", `${title} · ${payload.priority || "Normal"}`, caller);
+  // Notify every resident that a new notice was published.
+  await notifyRecipients(await allResidentEmails(), { type: "notice", noticeId: noticeRef.id, title: `New notice: ${title}`, body: String(payload.body || "").slice(0, 160) });
+  return { id: noticeRef.id };
+}
+
+async function approveExpense({ caller, payload }) {
+  ensureRole(caller.profile, FINANCE_ROLES);
+  const eventId = String(payload.eventId || ""); const expenseId = String(payload.expenseId || "");
+  await db.collection("events").doc(eventId).collection("expenses").doc(expenseId).set({ status: "Approved", approvedBy: caller.email, approvedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  await writeAudit("Approved expense", "Expense", `${expenseId} · ${eventId}`, caller);
+  return { ok: true };
+}
+
+async function settlementSummary({ caller }) {
+  ensureRole(caller.profile, FINANCE_ROLES);
+  const events = await db.collection("events").get();
+  // M-3: for a CLOSED event whose figures were frozen at settlement, reuse the
+  // stored settlementFigures instead of re-reading its contributions/expenses
+  // sub-collections (which never change again). Only open events — and closed
+  // events missing the snapshot — read live figures.
+  const settlements = await Promise.all(events.docs.map(async (entry) => {
+    const data = entry.data();
+    if (isClosedEventData(data) && data.settlementFigures) {
+      return { id: entry.id, ...data, ...data.settlementFigures };
+    }
+    return { id: entry.id, ...data, ...(await eventFigures(entry.id)) };
+  }));
+  const fund = await db.collection("system").doc("communityFund").get();
+  return { settlements, commonPool: Number(fund.data()?.balance || 0) };
+}
+
+async function confirmSettlement({ caller, payload }) {
+  ensureRole(caller.profile, ["super_admin", "treasurer"]);
+  const eventId = String(payload.eventId || ""); const figures = await eventFigures(eventId);
+  if (figures.pendingExpenses) throw new HttpsError("failed-precondition", "Approve pending expenses before confirming settlement.");
+  await db.collection("events").doc(eventId).set({ settlementStatus: "Treasurer confirmed", settlementConfirmedBy: caller.email, settlementConfirmedAt: admin.firestore.FieldValue.serverTimestamp(), settlementFigures: figures }, { merge: true });
+  await writeAudit("Treasurer confirmed settlement", "Event", `${eventId} · ${figures.balance}`, caller);
+  return figures;
+}
+
+async function allocateCommonPool({ caller, payload }) {
+  ensureRole(caller.profile, ADMIN_ROLES);
+  const eventId = String(payload.eventId || "");
+  const amount = Number(payload.amount || 0);
+  if (!eventId || !Number.isFinite(amount) || amount <= 0) throw new HttpsError("invalid-argument", "Enter a valid common-pool allocation amount.");
+  const eventRef = db.collection("events").doc(eventId);
+  const fundRef = db.collection("system").doc("communityFund");
+  let remainingPool = 0;
+  await db.runTransaction(async (transaction) => {
+    const [event, fund] = await Promise.all([transaction.get(eventRef), transaction.get(fundRef)]);
+    if (!event.exists) throw new HttpsError("not-found", "Event not found.");
+    if (/closed|settled/i.test(String(event.data().status || ""))) throw new HttpsError("failed-precondition", "A closed event cannot receive common-pool funds.");
+    const currentPool = Number(fund.data()?.balance || 0);
+    if (amount > currentPool) throw new HttpsError("failed-precondition", `Only ₹${Math.round(currentPool).toLocaleString("en-IN")} is currently available in the common pool.`);
+    remainingPool = currentPool - amount;
+    transaction.set(fundRef, { balance: remainingPool, updatedAt: admin.firestore.FieldValue.serverTimestamp(), lastAllocationEventId: eventId }, { merge: true });
+    transaction.set(eventRef, { commonPoolAllocation: Number(event.data().commonPoolAllocation || 0) + amount, commonPoolAllocatedAt: admin.firestore.FieldValue.serverTimestamp(), commonPoolAllocatedBy: caller.email }, { merge: true });
+  });
+  await writeAudit("Allocated common-pool funds", "Event", `${eventId} · ₹${amount}`, caller);
+  return { amount, commonPoolBalance: remainingPool };
+}
+
+async function closeSettlement({ caller, payload }) {
+  ensureRole(caller.profile, ADMIN_ROLES);
+  const eventId = String(payload.eventId || ""); const eventRef = db.collection("events").doc(eventId); const event = await eventRef.get();
+  if (!event.exists) throw new HttpsError("not-found", "Event not found.");
+  if (event.data().settlementStatus !== "Treasurer confirmed" && caller.profile.role !== "super_admin") throw new HttpsError("failed-precondition", "Treasurer confirmation is required before closure.");
+  const figures = await eventFigures(eventId); const fundRef = db.collection("system").doc("communityFund");
+  // Read the fund balance INSIDE the transaction (mirrors allocateCommonPool) so a
+  // concurrent allocation/closure can't be clobbered by a stale read-modify-write.
+  let nextPool = 0;
+  await db.runTransaction(async (transaction) => { const fund = await transaction.get(fundRef); nextPool = Number(fund.data()?.balance || 0) + figures.balance; transaction.set(eventRef, { status: "Closed", active: false, settlementStatus: "Closed", closedBy: caller.email, closedAt: admin.firestore.FieldValue.serverTimestamp(), settlementFigures: figures, commonPoolCarryForward: figures.balance }, { merge: true }); transaction.set(fundRef, { balance: nextPool, updatedAt: admin.firestore.FieldValue.serverTimestamp(), lastEventId: eventId }, { merge: true }); });
+  await writeAudit("Closed event settlement", "Event", `${eventId} · carry forward ${figures.balance}`, caller);
+  return { ...figures, commonPoolBalance: nextPool };
+}
+
+async function bookAmenity({ caller, payload }) {
+  ensureActive(caller.profile);
+  const AMENITIES = ["Party Hall", "Amphitheater", "Sauna"];
+  const amenity = String(payload.amenity || "").trim();
+  const date = String(payload.date || "").trim();
+  const slot = String(payload.slot || "Full day").trim();
+  const flat = String(payload.flat || "").trim();
+  const floor = String(payload.floor || "").trim();
+  const name = String(payload.name || caller.profile.name || "").trim();
+  const phone = String(payload.phone || "").trim();
+  const notes = String(payload.notes || "").trim();
+  const AMENITY_FEES = { "Party Hall": 2500, "Amphitheater": 2500, "Sauna": 1500 };
+  const fee = AMENITY_FEES[amenity] || Number(payload.fee) || 0;
+  if (!AMENITIES.includes(amenity) || !date || !flat) throw new HttpsError("invalid-argument", "Choose an amenity, date, and flat number.");
+
+  // Slot-clash guard: a slot already taken for this amenity+date can't be re-booked.
+  const requested = slot.split(",").map((s) => s.trim()).filter(Boolean);
+  const existingSnap = await db.collection("amenityBookings").where("amenity", "==", amenity).where("date", "==", date).get();
+  const active = existingSnap.docs.map((d) => d.data()).filter((b) => !["Rejected", "Cancelled"].includes(String(b.status || "")));
+  const takenTokens = new Set();
+  let fullDayTaken = false;
+  active.forEach((b) => {
+    const toks = String(b.slot || "").split(",").map((s) => s.trim());
+    if (toks.includes("Full day")) fullDayTaken = true;
+    toks.forEach((t) => takenTokens.add(t));
+  });
+  const clashes = requested.some((r) => (r === "Full day" ? active.length > 0 : (fullDayTaken || takenTokens.has(r))));
+  if (clashes) throw new HttpsError("failed-precondition", "One or more of those time slots are already booked for that date. Please pick a free slot.");
+
+  // For testing (no association / payment yet) bookings are CONFIRMED immediately — no
+  // committee approval. TODO: when the association enforces a fee, hold as "Pending
+  // payment" and only flip to Confirmed once payment to the association is recorded.
+  const ref = db.collection("amenityBookings").doc();
+  const booking = { id: ref.id, amenity, date, slot, flat, floor, name, phone, notes, fee, status: "Confirmed", requestedBy: caller.email, createdAt: admin.firestore.FieldValue.serverTimestamp() };
+  await ref.set(booking);
+  await writeAudit("Booked amenity", "Amenity", `${amenity} · ${date} · ${slot} · Flat ${flat}`, caller);
+  // The whole community is notified that a slot is now taken.
+  await notifyRecipients(await allResidentEmails(), { type: "amenity", title: `${amenity} booked`, body: `${amenity} on ${date} (${slot}) — booked by Flat ${flat}.` });
+  return { id: ref.id };
+}
+
+async function updateAmenityBooking({ caller, payload }) {
+  ensureRole(caller.profile, ADMIN_ROLES);
+  const id = String(payload.id || "").trim();
+  const status = String(payload.status || "Approved").trim();
+  if (!id) throw new HttpsError("invalid-argument", "Booking ID is required.");
+  await db.collection("amenityBookings").doc(id).set({ status, updatedBy: caller.email, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  await writeAudit(`${status} amenity booking`, "Amenity", `${id} · ${status}`, caller);
+  return { ok: true };
+}
+
+async function requestMoveService({ caller, payload }) {
+  ensureActive(caller.profile);
+  const moveType = String(payload.moveType || "Move-In").trim();
+  const flat = String(payload.flat || "").trim();
+  const block = String(payload.block || "Block A").trim();
+  const residentName = String(payload.residentName || "").trim();
+  const occupancyType = String(payload.occupancyType || "Owner").trim();
+  const moveDate = String(payload.moveDate || "").trim();
+  const leasePeriod = String(payload.leasePeriod || "").trim();
+  const primaryMobile = String(payload.primaryMobile || "").trim();
+  const primaryEmail = String(payload.primaryEmail || "").trim();
+  const emergencyName = String(payload.emergencyName || "").trim();
+  const emergencyRelation = String(payload.emergencyRelation || "").trim();
+  const emergencyMobile = String(payload.emergencyMobile || "").trim();
+  const fourWheelerNo = String(payload.fourWheelerNo || "").trim();
+  const twoWheelerNo = String(payload.twoWheelerNo || "").trim();
+  const expectedTime = String(payload.expectedTime || "").trim();
+  const shiftingAgencyName = String(payload.shiftingAgencyName || "").trim();
+  const shiftingAgencyContact = String(payload.shiftingAgencyContact || "").trim();
+  const familyMembers = Array.isArray(payload.familyMembers) ? payload.familyMembers : [];
+  const domesticStaff = Array.isArray(payload.domesticStaff) ? payload.domesticStaff : [];
+  const documentsSubmitted = Array.isArray(payload.documentsSubmitted) ? payload.documentsSubmitted : [];
+  const undertakingAccepted = payload.undertakingAccepted === true;
+  const declarationAccepted = payload.declarationAccepted === true;
+
+  if (!flat || !moveDate || !residentName) throw new HttpsError("invalid-argument", "Select flat, resident name, and move date.");
+  if (!undertakingAccepted || !declarationAccepted) throw new HttpsError("invalid-argument", "You must accept the Community Guidelines & Undertaking to submit.");
+
+  const ref = db.collection("moveRequests").doc();
+  const requestData = {
+    id: ref.id,
+    moveType,
+    flat,
+    block,
+    residentName,
+    occupancyType,
+    moveDate,
+    leasePeriod,
+    primaryMobile,
+    primaryEmail,
+    emergencyName,
+    emergencyRelation,
+    emergencyMobile,
+    fourWheelerNo,
+    twoWheelerNo,
+    expectedTime,
+    shiftingAgencyName,
+    shiftingAgencyContact,
+    garbageWasteAmount: Number(payload.garbageWasteAmount || 0),
+    familyMembers,
+    domesticStaff,
+    documentsSubmitted,
+    undertakingAccepted,
+    declarationAccepted,
+    status: "Requested",
+    nocIssued: false,
+    requestedBy: caller.email,
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+  await ref.set(requestData);
+  await writeAudit(`Submitted ${moveType} Registration & Undertaking`, "Move Management", `Flat ${flat} · ${residentName} · ${moveDate}`, caller);
+  return { id: ref.id };
+}
+
+async function updateMoveService({ caller, payload, request }) {
+  ensureRole(caller.profile, ADMIN_ROLES);
+  const id = String(payload.id || "").trim();
+  const status = String(payload.status || "Approved").trim();
+  const nocIssued = payload.nocIssued === true;
+  if (!id) throw new HttpsError("invalid-argument", "Move request ID is required.");
+  await db.collection("moveRequests").doc(id).set({ status, nocIssued, updatedBy: caller.email, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  await writeAudit(`Updated ${status} NOC request`, "Move Management", `${id} · NOC: ${nocIssued ? "Issued" : "Pending"}`, caller);
+  return { ok: true };
+}
+
+async function saveEmergencyContact({ caller, payload }) {
+  ensureRole(caller.profile, MANAGER_ROLES); // managers (assistant staff) maintain emergency contacts
+  const name = String(payload.name || "").trim();
+  const role = String(payload.role || "Emergency Contact").trim();
+  const phone = String(payload.phone || "").trim();
+  const photoUrl = String(payload.photoUrl || "").trim();
+  const availability = String(payload.availability || "24/7 Available").trim();
+  const contactType = ["emergency", "daily_helper"].includes(String(payload.contactType || "").trim()) ? String(payload.contactType).trim() : "emergency";
+  if (!name) throw new HttpsError("invalid-argument", "Contact name is required.");
+  if (contactType === "emergency" && !phone) throw new HttpsError("invalid-argument", "A mobile number is required for emergency contacts.");
+  const ref = payload.id ? db.collection("emergencyContacts").doc(String(payload.id)) : db.collection("emergencyContacts").doc();
+  await ref.set({ id: ref.id, name, role, phone, photoUrl, availability, contactType, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  await writeAudit(payload.id ? "Updated emergency contact" : "Added emergency contact", "Contacts", `${name} · ${role} · ${contactType}`, caller);
+  return { id: ref.id };
+}
+
+async function deleteEmergencyContact({ caller, payload }) {
+  ensureRole(caller.profile, MANAGER_ROLES); // managers (assistant staff) maintain emergency contacts
+  await db.collection("emergencyContacts").doc(String(payload.id)).delete();
+  await writeAudit("Removed emergency contact", "Contacts", String(payload.name || payload.id), caller);
+  return { ok: true };
+}
+
+async function saveGalleryPhoto({ caller, payload }) {
+  ensureRole(caller.profile, ADMIN_ROLES);
+  const title = String(payload.title || "").trim();
+  const category = String(payload.category || "Events").trim();
+  const photoUrl = String(payload.photoUrl || "").trim();
+  const caption = String(payload.caption || "").trim();
+  if (!title || !photoUrl) throw new HttpsError("invalid-argument", "Photo title and image URL are required.");
+  const ref = payload.id ? db.collection("galleryPhotos").doc(String(payload.id)) : db.collection("galleryPhotos").doc();
+  await ref.set({ id: ref.id, title, category, photoUrl, caption, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  await writeAudit(payload.id ? "Updated gallery photo" : "Uploaded gallery photo", "Gallery", `${title} · ${category}`, caller);
+  return { id: ref.id };
+}
+
+async function deleteGalleryPhoto({ caller, payload }) {
+  ensureRole(caller.profile, ADMIN_ROLES);
+  await db.collection("galleryPhotos").doc(String(payload.id)).delete();
+  await writeAudit("Deleted gallery photo", "Gallery", String(payload.title || payload.id), caller);
+  return { ok: true };
+}
+
+async function getExpansionData({ caller }) {
+  ensureActive(caller.profile);
+  const [bookings, moves, contacts, photos] = await Promise.all([
+    db.collection("amenityBookings").get(),
+    db.collection("moveRequests").get(),
+    db.collection("emergencyContacts").get(),
+    db.collection("galleryPhotos").get()
+  ]);
+  return {
+    amenityBookings: bookings.docs.map((d) => ({ id: d.id, ...d.data() })),
+    moveRequests: moves.docs.map((d) => ({ id: d.id, ...d.data() })),
+    emergencyContacts: contacts.docs.map((d) => ({ id: d.id, ...d.data() })),
+    galleryPhotos: photos.docs.map((d) => ({ id: d.id, ...d.data() }))
+  };
+}
+
+async function verifyDataSync({ caller }) {
+  ensureRole(caller.profile, ADMIN_ROLES);
+  const [eventsSnap, noticesSnap, residentsSnap, committeeSnap, usersSnap, invitesSnap, migrationSnap] = await Promise.all([
+    db.collection("events").get(),
+    db.collection("notices").get(),
+    db.collection("residents").get(),
+    db.collection("committee").get(),
+    db.collection("users").get(),
+    db.collection("accessInvites").get(),
+    db.collection("system").doc("migration").get()
+  ]);
+  let totalExpenses = 0;
+  let totalContributions = 0;
+  const duplicatesReport = [];
+
+  for (const eventDoc of eventsSnap.docs) {
+    const eventData = eventDoc.data();
+    const [exp, con] = await Promise.all([
+      db.collection("events").doc(eventDoc.id).collection("expenses").get(),
+      db.collection("events").doc(eventDoc.id).collection("contributions").get()
+    ]);
+    totalExpenses += exp.size;
+    totalContributions += con.size;
+
+    const flatMap = new Map();
+    con.docs.forEach((doc) => {
+      const d = doc.data();
+      const flat = String(d.flat || d.flatNo || "").trim().toUpperCase();
+      if (!flat) return;
+      if (!flatMap.has(flat)) flatMap.set(flat, []);
+      flatMap.get(flat).push({
+        id: doc.id,
+        flat,
+        amount: d.amount || 0,
+        ownerName: d.ownerName || d.name || d.residentName || "N/A",
+        paymentMode: d.paymentMode || d.mode || "N/A",
+        reference: d.reference || d.ref || d.transactionRef || "N/A",
+        date: d.date || d.createdAt || "N/A"
+      });
+    });
+
+    const eventDuplicates = [];
+    flatMap.forEach((records, flat) => {
+      if (records.length > 1) {
+        eventDuplicates.push({ flat, count: records.length, records });
+      }
+    });
+
+    if (eventDuplicates.length > 0) {
+      duplicatesReport.push({
+        eventId: eventDoc.id,
+        eventName: eventData.name || eventData.title || eventDoc.id,
+        active: Boolean(eventData.active),
+        duplicateCount: eventDuplicates.length,
+        flats: eventDuplicates
+      });
+    }
+  }
+
+  const residents = residentsSnap.docs.map(d => d.data());
+  const occupancyCounts = {
+    owner_occupied: residents.filter(r => String(r.occupancy || r.occupancyStatus || "").toLowerCase().includes("owner")).length,
+    tenant_occupied: residents.filter(r => String(r.occupancy || r.occupancyStatus || "").toLowerCase().includes("tenant")).length,
+    vacant: residents.filter(r => String(r.occupancy || r.occupancyStatus || "").toLowerCase().includes("vacant")).length,
+    unverified: residents.filter(r => String(r.occupancy || r.occupancyStatus || "").toLowerCase().includes("unverified")).length
+  };
+  return {
+    synced: true,
+    lastMigration: migrationSnap.exists ? migrationSnap.data() : null,
+    counts: {
+      events: eventsSnap.size,
+      notices: noticesSnap.size,
+      residents: residentsSnap.size,
+      committee: committeeSnap.size,
+      expenses: totalExpenses,
+      contributions: totalContributions,
+      users: usersSnap.size + invitesSnap.size
+    },
+    duplicatesReport,
+    occupancyBreakdown: occupancyCounts,
+    eventList: eventsSnap.docs.map(d => ({ id: d.id, name: d.data().name || d.data().title, date: d.data().date || d.data().startDate, active: d.data().active }))
+  };
+}
+
+async function readPaymentReference({ caller, payload }) {
+  // Billed per image, so only the people who can record this event's payments may use it.
+  ensureActive(caller.profile);
+  const eventId = String(payload.eventId || "");
+  const eventSnap = eventId ? await db.collection("events").doc(eventId).get() : null;
+  if (!eventSnap?.exists) throw new HttpsError("not-found", "Event not found.");
+  if (!DIRECTORY_EDITOR_ROLES.includes(caller.profile.role) && !(await callerSpocFloors(caller, eventSnap.data())).length) throw new HttpsError("permission-denied", "Only this event's SPOCs, committee, or administrators can read payment screenshots.");
+  const bucket = admin.storage().bucket();
+  const match = String(payload.url || "").match(/^https:\/\/firebasestorage\.googleapis\.com\/v0\/b\/([^/]+)\/o\/([^?]+)/);
+  let path = "";
+  try { path = match ? decodeURIComponent(match[2]) : ""; } catch (e) { /* malformed URL */ }
+  if (!match || match[1] !== bucket.name || !path.startsWith(`event-receipts/${eventId}/`)) throw new HttpsError("invalid-argument", "Upload the payment screenshot first.");
+  try {
+    const file = bucket.file(path);
+    const [metadata] = await file.getMetadata();
+    if (!String(metadata.contentType || "").startsWith("image/")) return { reference: "" }; // PDFs etc.: enter manually
+    const [content] = await file.download();
+    return { reference: extractUpiReference(await detectImageText(content)) };
+  } catch (error) {
+    logger.warn(`readPaymentReference: ${error.message}`);
+    return { reference: "" };
+  }
+}
+
+async function importSpreadsheet({ caller, payload }) {
+  ensureRole(caller.profile, ADMIN_ROLES);
+  const result = await processSnapshotData(payload || {});
+  await writeAudit("Imported spreadsheet data", "System", `Processed ${result.writes} records`, caller);
+  return result;
+}
+
+async function backfillDirectoryAccess({ caller }) {
+  ensureRole(caller.profile, ADMIN_ROLES);
+  const residents = await db.collection("residents").get();
+  const entries = [];
+  residents.docs.forEach((doc) => {
+    const r = doc.data();
+    const flat = r.flat || doc.id;
+    const ownerName = r.ownerName || r.name || "";
+    const tenantName = r.tenantName || "";
+    [r.ownerPrimaryEmail, r.ownerEmail, r.ownerSecondaryEmail].forEach((email) => { if (email) entries.push({ email, name: ownerName, residentType: "Owner", flat }); });
+    [r.tenantPrimaryEmail, r.tenantEmail, r.tenantSecondaryEmail].forEach((email) => { if (email) entries.push({ email, name: tenantName, residentType: "Tenant", flat }); });
+  });
+  const granted = await syncDirectoryAccess(entries);
+  await writeAudit("Backfilled directory access", "Access", `${granted.length} resident invites from directory (${residents.size} flats scanned)`, caller);
+  return { ok: true, granted: granted.length, scanned: residents.size, emails: granted };
+}
+
+async function normalizeVehicleNumbers({ caller }) {
+  ensureRole(caller.profile, ADMIN_ROLES);
+  const residents = await db.collection("residents").get();
+  let updatedFlats = 0;
+  let updatedVehicles = 0;
+  for (const doc of residents.docs) {
+    const vehicles = doc.data().vehicles;
+    if (!Array.isArray(vehicles) || !vehicles.length) continue;
+    let changed = false;
+    const normalized = vehicles.map((v) => {
+      const details = String(v.details || "").trim();
+      const upper = details.toUpperCase();
+      if (upper !== details) { changed = true; updatedVehicles += 1; }
+      return { ...v, details: upper };
+    });
+    if (changed) {
+      await doc.ref.set({ vehicles: normalized, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      updatedFlats += 1;
+    }
+  }
+  if (updatedFlats) await bumpDirectoryVersion();
+  await writeAudit("Normalized vehicle numbers to uppercase", "Directory", `${updatedVehicles} vehicles across ${updatedFlats} flats`, caller);
+  return { ok: true, updatedFlats, updatedVehicles, scanned: residents.size };
+}
+
+const ADMIN_ACTIONS = {
+  saveResidentProfile,
+  updateOwnVehicles,
+  recordContribution,
+  editContribution,
+  deleteContribution,
+  recordAdditionalContribution,
+  recordExpense,
+  reviewExpense,
+  createEvent: saveEvent,
+  updateEvent: saveEvent,
+  activateEvent,
+  completeEvent,
+  saveCommittee,
+  deleteCommittee,
+  publishNotice,
+  approveExpense,
+  settlementSummary,
+  confirmSettlement,
+  allocateCommonPool,
+  closeSettlement,
+  bookAmenity,
+  updateAmenityBooking,
+  requestMoveService,
+  updateMoveService,
+  saveEmergencyContact,
+  deleteEmergencyContact,
+  saveGalleryPhoto,
+  deleteGalleryPhoto,
+  getExpansionData,
+  verifyDataSync,
+  readPaymentReference,
+  importSpreadsheet,
+  backfillDirectoryAccess,
+  normalizeVehicleNumbers,
+};
+
 exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
   ensureReadPatch();
   const action = String(request.data?.action || "");
   const caller = await callerProfile(request);
   await assertNotMaintenance(caller);
   const payload = request.data?.payload || {};
-
-  if (action === "saveResidentProfile") {
-    const flat = String(payload.flat || "").trim();
-    if (!flat) throw new HttpsError("invalid-argument", "Flat number is required.");
-    const residentRef = db.collection("residents").doc(flat);
-    const existing = await residentRef.get();
-    const before = existing.data() || {};
-    
-    // Permission check: Admins/Committee edit any flat's full profile; a verified
-    // Homeowner edits their own flat's full profile; a verified Tenant may edit ONLY
-    // their own tenant contact block (owner/flat fields are stripped below).
-    const isAdmin = DIRECTORY_EDITOR_ROLES.includes(caller.profile.role);
-    const callerEmail = String(caller.email || "").trim().toLowerCase();
-    const callerFlatMatch = String(caller.profile.flat || "").trim().toUpperCase() === flat.toUpperCase();
-    const ownerEmails = [before.ownerEmail, before.ownerPrimaryEmail, before.ownerSecondaryEmail].map((e) => String(e || "").trim().toLowerCase()).filter(Boolean);
-    const tenantEmails = [before.tenantEmail, before.tenantPrimaryEmail, before.tenantSecondaryEmail].map((e) => String(e || "").trim().toLowerCase()).filter(Boolean);
-    const isOwner = ownerEmails.includes(callerEmail)
-      || (String(caller.profile.residentType || "").toLowerCase() === "owner" && callerFlatMatch);
-    const isTenant = tenantEmails.includes(callerEmail)
-      || (String(caller.profile.residentType || "").toLowerCase() === "tenant" && callerFlatMatch);
-
-    if (!isAdmin && !isOwner && !isTenant) {
-      throw new HttpsError("permission-denied", "Only the verified Homeowner or Tenant of this flat, or an Administrator, can update flat details.");
-    }
-    // A tenant-only editor may touch tenant + family-contact fields only — never
-    // owner, occupancy, parking or vehicle data. Strip those from the payload so the
-    // merge-safe defaults below preserve the committee-verified owner record.
-    if (!isAdmin && !isOwner && isTenant) {
-      for (const k of ["ownerName", "ownerMobile", "phone", "ownerEmail", "ownerPrimaryEmail", "ownerSecondaryEmail", "ownerPhotoUrl", "occupancy", "subStatus", "parkingAllocation", "parkingLevel", "parkingSlots", "vehicles", "isOutstation", "caretakerName", "caretakerMobile", "caretakerRelation"]) {
-        delete payload[k];
-      }
-    }
-
-    const rawOccupancy = String(payload.occupancy || "").trim();
-    const validOccupancies = ["Owner occupied", "Tenant occupied", "Unoccupied (Owner Owned)", "Vacant", "Unverified"];
-    // Preserve the stored value whenever the caller omits a field, so a partial /
-    // self-service update (e.g. a phone-only save from the app) never blanks
-    // occupancy, family-contact, tenant or caretaker data. The web app always sends
-    // the full payload, so its behaviour is unchanged.
-    const occupancy = rawOccupancy
-      ? (validOccupancies.find(o => o.toLowerCase() === rawOccupancy.toLowerCase()) || "Unverified")
-      : (before.occupancy || before.occupancyStatus || "Unverified");
-
-    const subStatus = payload.subStatus !== undefined ? String(payload.subStatus || "").trim() : String(before.subStatus || "").trim();
-    const resolvedOwnerName = String(payload.ownerName || before.ownerName || before.name || "").trim();
-    const resolvedTenantName = payload.tenantName !== undefined ? String(payload.tenantName || "").trim() : String(before.tenantName || "").trim();
-    const ownerPrimaryEmail = payload.ownerPrimaryEmail !== undefined ? String(payload.ownerPrimaryEmail || "").trim().toLowerCase() : (payload.ownerEmail !== undefined ? String(payload.ownerEmail || "").trim().toLowerCase() : (before.ownerPrimaryEmail || before.ownerEmail || ""));
-    const ownerSecondaryEmail = payload.ownerSecondaryEmail !== undefined ? String(payload.ownerSecondaryEmail || "").trim().toLowerCase() : (before.ownerSecondaryEmail || "");
-    const tenantPrimaryEmail = payload.tenantPrimaryEmail !== undefined ? String(payload.tenantPrimaryEmail || "").trim().toLowerCase() : (payload.tenantEmail !== undefined ? String(payload.tenantEmail || "").trim().toLowerCase() : (before.tenantPrimaryEmail || before.tenantEmail || ""));
-    const tenantSecondaryEmail = payload.tenantSecondaryEmail !== undefined ? String(payload.tenantSecondaryEmail || "").trim().toLowerCase() : (before.tenantSecondaryEmail || "");
-    const ownerEmail = ownerPrimaryEmail;
-    const tenantEmail = tenantPrimaryEmail;
-
-    if (occupancy === "Owner occupied" && !resolvedOwnerName) throw new HttpsError("invalid-argument", "Enter the owner name for an owner-occupied flat.");
-    if (occupancy === "Tenant occupied" && !resolvedTenantName) throw new HttpsError("invalid-argument", "Enter the tenant name for a tenant-occupied flat.");
-    
-    const parkingAllocation = ["", "Single car parking", "Double car parking"].includes(String(payload.parkingAllocation || "")) ? String(payload.parkingAllocation || "") : (before.parkingAllocation || "");
-    const parkingLevel = ["", "B1", "B2"].includes(String(payload.parkingLevel || "").toUpperCase()) ? String(payload.parkingLevel || "").toUpperCase() : (before.parkingLevel || "");
-    const parkingSlots = payload.parkingSlots !== undefined ? String(payload.parkingSlots || "").trim() : (before.parkingSlots || "");
-    const vehicles = Array.isArray(payload.vehicles) ? payload.vehicles.map((item) => ({ type: ["Two wheeler", "Four wheeler"].includes(item.type) ? item.type : "Two wheeler", details: String(item.details || "").trim().toUpperCase() })).filter((item) => item.details) : (before.vehicles || []);
-    // Parking is not yet allotted by the builder, so residents can record vehicle
-    // details without a parking allocation. Slot data stays optional.
-
-    const ownerPhotoUrl = String(payload.ownerPhotoUrl || "").trim();
-    if (ownerPhotoUrl && !/^https:\/\//i.test(ownerPhotoUrl)) throw new HttpsError("invalid-argument", "The owner photo link is not valid.");
-
-    const next = {
-      flat,
-      flatNo: flat,
-      floor: before.floor || String(flat.slice(0, 1)).toUpperCase(),
-      occupancy,
-      occupancyStatus: occupancy,
-      subStatus,
-      ownerEmail,
-      ownerPrimaryEmail,
-      ownerSecondaryEmail,
-      tenantEmail,
-      tenantPrimaryEmail,
-      tenantSecondaryEmail,
-      familyContactName: payload.familyContactName !== undefined ? String(payload.familyContactName || "").trim() : String(before.familyContactName || "").trim(),
-      familyContactMobile: (payload.familyContactMobile !== undefined || payload.familyContactPhone !== undefined) ? String(payload.familyContactMobile || payload.familyContactPhone || "").trim() : String(before.familyContactMobile || before.familyContactPhone || "").trim(),
-      familyContactPhone: (payload.familyContactMobile !== undefined || payload.familyContactPhone !== undefined) ? String(payload.familyContactMobile || payload.familyContactPhone || "").trim() : String(before.familyContactPhone || before.familyContactMobile || "").trim(),
-      familyContactEmail: payload.familyContactEmail !== undefined ? String(payload.familyContactEmail || "").trim().toLowerCase() : String(before.familyContactEmail || "").trim().toLowerCase(),
-      familyContactRelation: payload.familyContactRelation !== undefined ? String(payload.familyContactRelation || "").trim() : String(before.familyContactRelation || "").trim(),
-      ownerName: resolvedOwnerName,
-      phone: String(payload.ownerMobile || payload.phone || before.phone || before.ownerMobile || "").trim(),
-      ownerMobile: String(payload.ownerMobile || payload.phone || before.ownerMobile || before.phone || "").trim(),
-      tenantName: resolvedTenantName,
-      tenantMobile: payload.tenantMobile !== undefined ? String(payload.tenantMobile || "").trim() : String(before.tenantMobile || "").trim(),
-      isOutstation: payload.isOutstation !== undefined ? Boolean(payload.isOutstation) : Boolean(before.isOutstation),
-      caretakerName: payload.caretakerName !== undefined ? String(payload.caretakerName || "").trim() : String(before.caretakerName || "").trim(),
-      caretakerMobile: payload.caretakerMobile !== undefined ? String(payload.caretakerMobile || "").trim() : String(before.caretakerMobile || "").trim(),
-      caretakerRelation: payload.caretakerRelation !== undefined ? String(payload.caretakerRelation || "").trim() : String(before.caretakerRelation || "").trim(),
-      parkingAllocation,
-      parkingLevel,
-      parkingSlots,
-      vehicles,
-      updatedBy: caller.email,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    };
-    if (ownerPhotoUrl) { next.ownerPhotoUrl = ownerPhotoUrl; next.photoUrl = ownerPhotoUrl; }
-    
-    await residentRef.set(next, { merge: true });
-    
-    const parkingChanged = ["parkingAllocation", "parkingLevel", "parkingSlots", "vehicles"].some((key) => JSON.stringify(before[key] || "") !== JSON.stringify(next[key] || ""));
-    if (parkingChanged) await db.collection("parkingAuditLogs").add({ flat, actor: caller.email, previous: { parkingAllocation: before.parkingAllocation || "", parkingLevel: before.parkingLevel || "", parkingSlots: before.parkingSlots || "", vehicles: before.vehicles || [] }, updated: { parkingAllocation, parkingLevel, parkingSlots, vehicles }, createdAt: admin.firestore.FieldValue.serverTimestamp() });
-
-    // Auto-grant resident portal access for every owner/tenant email on this flat.
-    const grantedAccess = await syncDirectoryAccess([
-      { email: ownerPrimaryEmail, name: next.ownerName, residentType: "Owner", flat },
-      { email: ownerSecondaryEmail, name: next.ownerName, residentType: "Owner", flat },
-      { email: tenantPrimaryEmail, name: next.tenantName, residentType: "Tenant", flat },
-      { email: tenantSecondaryEmail, name: next.tenantName, residentType: "Tenant", flat }
-    ]);
-
-    await bumpDirectoryVersion();
-    await writeAudit("Updated resident profile", "Resident", `${flat} · ${occupancy}${subStatus ? ` (${subStatus})` : ""}${grantedAccess.length ? ` · access: ${grantedAccess.length}` : ""}`, caller);
-    // Notify the flat's residents that their profile was changed (skip the editor,
-    // so a resident's own self-service edit doesn't ping themselves).
-    const callerLower = String(caller.email || "").trim().toLowerCase();
-    const flatContacts = [ownerPrimaryEmail, ownerSecondaryEmail, tenantPrimaryEmail, tenantSecondaryEmail, next.familyContactEmail]
-      .filter(Boolean).filter((e) => String(e).toLowerCase() !== callerLower);
-    await notifyRecipients(flatContacts, { type: "profile_update", title: "Your flat profile was updated", body: `${flat} details were updated by ${caller.profile.name || "the committee"}.` });
-    return { ok: true, accessGranted: grantedAccess.length };
-  }
-
-  if (action === "updateOwnVehicles") {
-    // Vehicle-only self-service: any active resident tied to the flat (owner,
-    // tenant, or family email, or a matching profile flat) may update the
-    // vehicle list. No other flat fields can be changed through this path.
-    ensureActive(caller.profile);
-    const flat = String(payload.flat || "").trim();
-    if (!flat) throw new HttpsError("invalid-argument", "Flat number is required.");
-    const residentRef = db.collection("residents").doc(flat);
-    const snap = await residentRef.get();
-    if (!snap.exists) throw new HttpsError("not-found", "Flat not found.");
-    const before = snap.data() || {};
-    const callerEmail = String(caller.email || "").trim().toLowerCase();
-    const flatEmails = [before.ownerEmail, before.ownerPrimaryEmail, before.ownerSecondaryEmail, before.tenantEmail, before.tenantPrimaryEmail, before.tenantSecondaryEmail, before.familyContactEmail].map((e) => String(e || "").trim().toLowerCase()).filter(Boolean);
-    const isStaff = DIRECTORY_EDITOR_ROLES.includes(caller.profile.role);
-    const belongsToFlat = flatEmails.includes(callerEmail) || String(caller.profile.flat || "").trim().toUpperCase() === flat.toUpperCase();
-    if (!isStaff && !belongsToFlat) throw new HttpsError("permission-denied", "You can only update the vehicles for your own flat.");
-    const vehicles = Array.isArray(payload.vehicles) ? payload.vehicles.map((item) => ({ type: ["Two wheeler", "Four wheeler"].includes(item.type) ? item.type : "Two wheeler", details: String(item.details || "").trim().toUpperCase() })).filter((item) => item.details) : [];
-    await residentRef.set({ vehicles, updatedBy: caller.email, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-    if (JSON.stringify(before.vehicles || []) !== JSON.stringify(vehicles)) {
-      await db.collection("parkingAuditLogs").add({ flat, actor: caller.email, previous: { vehicles: before.vehicles || [] }, updated: { vehicles }, createdAt: admin.firestore.FieldValue.serverTimestamp() });
-    }
-    await bumpDirectoryVersion();
-    await writeAudit("Updated own vehicle details", "Directory", `${flat} · ${vehicles.length} vehicle(s)`, caller);
-    return { ok: true, vehicles };
-  }
-
-  if (action === "recordContribution") {
-    ensureActive(caller.profile);
-    const eventId = String(payload.eventId || "");
-    const flat = String(payload.flat || "").trim();
-    const floor = String(payload.floor || "").trim();
-    const name = String(payload.name || "").trim();
-    const paymentMode = String(payload.paymentMode || "").trim();
-    const reference = String(payload.reference || "").replace(/\s+/g, "");
-    const amount = Number(payload.amount || 0);
-    const contributorType = String(payload.contributorType || "Owner");
-    const receiptUrls = cleanReceiptUrls(payload.receiptUrls);
-
-    const eventSnap = await db.collection("events").doc(eventId).get();
-    if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
-    const eventData = eventSnap.data();
-
-    if (!eventId || !flat || !floor || !name) throw new HttpsError("invalid-argument", "Select a floor and flat before saving this contribution.");
-    if (!["Owner", "Tenant"].includes(contributorType)) throw new HttpsError("invalid-argument", "Choose whether the owner or the tenant paid.");
-    // Amount is now free-form (variable) — the SPOC enters what was collected.
-    if (!Number.isFinite(amount) || amount <= 0) throw new HttpsError("invalid-argument", "Enter a valid contribution amount.");
-    if (!["UPI", "Cash", "Bank Transfer"].includes(paymentMode)) throw new HttpsError("invalid-argument", "Choose a valid payment mode.");
-    if (paymentMode !== "Cash" && !reference) throw new HttpsError("invalid-argument", "Enter the UPI or bank transaction reference.");
-    if (isClosedEventData(eventData)) throw new HttpsError("failed-precondition", "This event is settled and closed; contributions can no longer be added.");
-
-    // Access: floor SPOC (own floor) or admin/committee (any floor). Multiple
-    // contributions per flat are allowed — no duplicate block.
-    await assertCanManageContribution(caller, eventData, floor);
-    if (contributorType === "Tenant") await assertTenantOccupied(flat);
-    await assertUniqueReference(eventId, paymentMode, reference, null);
-
-    const contributionRef = db.collection("events").doc(eventId).collection("contributions").doc();
-    await contributionRef.set({ id: contributionRef.id, eventId, floor, flat, name, contributorType, amount, paymentMode, reference, receiptUrls, status: "Received", date: normalizeContributionDate(payload.date), createdAt: FIELD_VALUE.serverTimestamp(), recordedBy: caller.email });
-    await writeAudit("Recorded contribution", "Contribution", `${flat} · ${String(eventData.name || eventId)} · ₹${Math.round(amount)}`, caller);
-    return { id: contributionRef.id, amount };
-  }
-  if (action === "editContribution") {
-    ensureActive(caller.profile);
-    const eventId = String(payload.eventId || "");
-    const contributionId = String(payload.contributionId || "");
-    if (!eventId || !contributionId) throw new HttpsError("invalid-argument", "Event ID and contribution ID are required.");
-    const eventSnap = await db.collection("events").doc(eventId).get();
-    if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
-    const eventData = eventSnap.data();
-    if (isClosedEventData(eventData)) throw new HttpsError("failed-precondition", "This event is settled and closed; its contributions can no longer be edited.");
-    const ref = db.collection("events").doc(eventId).collection("contributions").doc(contributionId);
-    const snap = await ref.get();
-    if (!snap.exists) throw new HttpsError("not-found", "Contribution not found.");
-    const before = snap.data();
-    await assertCanManageContribution(caller, eventData, String(before.floor || "").trim());
-    const updates = { updatedBy: caller.email, updatedAt: FIELD_VALUE.serverTimestamp() };
-    if (payload.amount !== undefined) {
-      const amt = Number(payload.amount);
-      if (!Number.isFinite(amt) || amt <= 0) throw new HttpsError("invalid-argument", "Enter a valid contribution amount.");
-      updates.amount = amt;
-    }
-    if (payload.name !== undefined) updates.name = String(payload.name || "").trim();
-    if (payload.contributorType !== undefined) {
-      if (!["Owner", "Tenant"].includes(payload.contributorType)) throw new HttpsError("invalid-argument", "Choose whether the owner or the tenant paid.");
-      if (payload.contributorType === "Tenant" && before.contributorType !== "Tenant") await assertTenantOccupied(before.flat);
-      updates.contributorType = payload.contributorType;
-    }
-    if (payload.paymentMode !== undefined) {
-      if (!["UPI", "Cash", "Bank Transfer"].includes(payload.paymentMode)) throw new HttpsError("invalid-argument", "Choose a valid payment mode.");
-      updates.paymentMode = payload.paymentMode;
-    }
-    if (payload.reference !== undefined) updates.reference = String(payload.reference || "").replace(/\s+/g, "");
-    if (payload.receiptUrls !== undefined) updates.receiptUrls = cleanReceiptUrls(payload.receiptUrls);
-    if (updates.reference && updates.reference !== before.reference) await assertUniqueReference(eventId, updates.paymentMode || before.paymentMode, updates.reference, contributionId);
-    if (payload.date !== undefined && String(payload.date).trim()) updates.date = normalizeContributionDate(payload.date);
-    await ref.set(updates, { merge: true });
-    await writeAudit("Edited contribution", "Contribution", `${before.flat} · ${String(eventData.name || eventId)} · ₹${Math.round(updates.amount ?? before.amount ?? 0)}`, caller);
-    return { ok: true };
-  }
-  if (action === "deleteContribution") {
-    ensureActive(caller.profile);
-    const eventId = String(payload.eventId || "");
-    const contributionId = String(payload.contributionId || "");
-    if (!eventId || !contributionId) throw new HttpsError("invalid-argument", "Event ID and contribution ID are required.");
-    const eventSnap = await db.collection("events").doc(eventId).get();
-    if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
-    const eventData = eventSnap.data();
-    if (isClosedEventData(eventData)) throw new HttpsError("failed-precondition", "This event is settled and closed; its contributions can no longer be removed.");
-    const ref = db.collection("events").doc(eventId).collection("contributions").doc(contributionId);
-    const snap = await ref.get();
-    if (!snap.exists) throw new HttpsError("not-found", "Contribution not found.");
-    const before = snap.data();
-    await assertCanManageContribution(caller, eventData, String(before.floor || "").trim());
-    await ref.delete();
-    await writeAudit("Deleted contribution", "Contribution", `${before.flat} · ${String(eventData.name || eventId)} · ₹${Math.round(before.amount || 0)}`, caller);
-    return { ok: true };
-  }
-  if (action === "recordAdditionalContribution") {
-    // Post-settlement "deficit recovery": SPOCs/admins record additional,
-    // VARIABLE-amount top-ups from owners when an event's available balance is
-    // negative. Kept in a separate sub-collection so the fixed-amount /
-    // one-per-flat rules and the frozen settlementFigures are untouched. Repeats
-    // and over-coverage (surplus) are allowed; the common fund is NOT auto-moved
-    // (the treasurer reconciles it).
-    ensureActive(caller.profile);
-    const eventId = String(payload.eventId || "");
-    const flat = String(payload.flat || "").trim();
-    const floor = String(payload.floor || "").trim();
-    const name = String(payload.name || "").trim();
-    const paymentMode = String(payload.paymentMode || "").trim();
-    const reference = String(payload.reference || "").trim();
-    const note = String(payload.note || "").trim();
-    const amount = Number(payload.amount || 0);
-
-    const eventSnap = await db.collection("events").doc(eventId).get();
-    if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
-    const eventData = eventSnap.data();
-
-    if (!eventId || !flat || !floor || !name) throw new HttpsError("invalid-argument", "Select a floor and flat before saving this contribution.");
-    if (!Number.isFinite(amount) || amount <= 0) throw new HttpsError("invalid-argument", "Enter a valid contribution amount.");
-    if (!["UPI", "Cash", "Bank Transfer"].includes(paymentMode)) throw new HttpsError("invalid-argument", "Choose a valid payment mode.");
-    if (paymentMode !== "Cash" && !reference) throw new HttpsError("invalid-argument", "Enter the UPI or bank transaction reference.");
-
-    // Permitted only while the event ran a deficit: available balance (frozen
-    // figures for a closed event, else live) is negative.
-    const figures = (isClosedEventData(eventData) && eventData.settlementFigures) ? eventData.settlementFigures : await eventFigures(eventId);
-    if (Number(figures.balance || 0) >= 0) throw new HttpsError("failed-precondition", "Additional contributions can be recorded only while this event's available balance is negative.");
-
-    // Same access as normal contributions: admin/committee (any floor) or the floor SPOC.
-    await assertCanManageContribution(caller, eventData, floor);
-
-    const ref = db.collection("events").doc(eventId).collection("additionalContributions").doc();
-    await ref.set({ id: ref.id, eventId, floor, flat, name, amount, paymentMode, reference, note, status: "Received", kind: "additional", date: new Date().toISOString(), createdAt: FIELD_VALUE.serverTimestamp(), recordedBy: caller.email });
-    await writeAudit("Recorded additional contribution", "Contribution", `${flat} · ${String(eventData.name || eventId)} · ₹${Math.round(amount)} (deficit recovery)`, caller);
-    return { id: ref.id, amount };
-  }
-  if (action === "recordExpense") {
-    ensureActive(caller.profile);
-    const eventId = String(payload.eventId || "");
-    const category = String(payload.category || "").trim();
-    const description = String(payload.description || "").trim();
-    const paidBy = String(payload.paidBy || "").trim();
-    const paymentMode = String(payload.paymentMode || "").trim();
-    const amount = Number(payload.amount || 0);
-    const reference = String(payload.reference || "").trim();
-    const remarks = String(payload.remarks || "").trim();
-    // Support multiple receipts per expense (e.g. an advance plus the balance
-    // paid via different modes). Accepts receiptUrls[] and/or a single receiptUrl.
-    const receiptUrls = [
-      ...(Array.isArray(payload.receiptUrls) ? payload.receiptUrls : []),
-      ...(payload.receiptUrl ? [payload.receiptUrl] : [])
-    ].map((u) => String(u || "").trim()).filter(Boolean);
-    if (!eventId || !category || !description || !paidBy || !amount || amount <= 0) throw new HttpsError("invalid-argument", "Complete the event, category, description, payer, and amount.");
-    if (!["UPI", "Cash", "Bank Transfer"].includes(paymentMode)) throw new HttpsError("invalid-argument", "Choose a valid payment mode.");
-    for (const u of receiptUrls) { if (!/^https:\/\//i.test(u)) throw new HttpsError("invalid-argument", "A receipt link is not valid."); }
-    const receiptUrl = receiptUrls[0] || "";
-    const event = await db.collection("events").doc(eventId).get();
-    if (!event.exists) throw new HttpsError("not-found", "Event not found.");
-    if (isClosedEventData(event.data())) throw new HttpsError("failed-precondition", "This event is settled and closed for new expenses.");
-
-    // Admins, committee members, or any SPOC of this event may submit expenses.
-    if (!DIRECTORY_EDITOR_ROLES.includes(caller.profile.role) && !(await callerSpocFloors(caller, event.data())).length) {
-      throw new HttpsError("permission-denied", "Only a floor SPOC, an administrator, or a committee member can submit expenses for this event.");
-    }
-
-    const expenseRef = db.collection("events").doc(eventId).collection("expenses").doc();
-    await expenseRef.set({ id: expenseRef.id, eventId, category, description, amount, paidBy, paymentMode, reference, remarks, receiptUrl, receiptUrls, status: "Pending", date: new Date().toISOString(), createdAt: admin.firestore.FieldValue.serverTimestamp(), recordedBy: caller.email, submittedBy: caller.profile.name || caller.email });
-    await writeAudit("Submitted expense", "Expense", `${expenseRef.id} · ${String(event.data().name || eventId)} · ₹${Math.round(amount)}`, caller);
-    return { id: expenseRef.id };
-  }
-  if (action === "reviewExpense") {
-    ensureRole(caller.profile, FINANCE_ROLES);
-    const { eventId, expenseId, status, adminComment, category, description, amount, paidBy, paymentMode, reference, remarks } = payload;
-    if (!eventId || !expenseId) throw new HttpsError("invalid-argument", "Event ID and Expense ID are required.");
-    if (!["Approved", "Rejected"].includes(status)) throw new HttpsError("invalid-argument", "Status must be Approved or Rejected.");
-    // A settled/closed event's finance is frozen — its expenses can no longer be
-    // edited, approved, or rejected (mirrors the recordExpense closure guard).
-    const eventDoc = await db.collection("events").doc(String(eventId)).get();
-    if (!eventDoc.exists) throw new HttpsError("not-found", "Event not found.");
-    if (isClosedEventData(eventDoc.data())) throw new HttpsError("failed-precondition", "This event is settled and closed; its expenses can no longer be edited.");
-    const expenseRef = db.collection("events").doc(String(eventId)).collection("expenses").doc(String(expenseId));
-    const expenseSnap = await expenseRef.get();
-    if (!expenseSnap.exists) throw new HttpsError("not-found", "Expense not found.");
-    const updates = {
-      status,
-      adminComment: String(adminComment || "").trim(),
-      reviewedBy: caller.email,
-      reviewedAt: admin.firestore.FieldValue.serverTimestamp(),
-    };
-    if (category) updates.category = String(category).trim();
-    if (description) updates.description = String(description).trim();
-    if (amount && Number(amount) > 0) updates.amount = Number(amount);
-    if (paidBy) updates.paidBy = String(paidBy).trim();
-    if (paymentMode && ["UPI", "Cash", "Bank Transfer"].includes(paymentMode)) updates.paymentMode = String(paymentMode);
-    if (reference !== undefined) updates.reference = String(reference || "").trim();
-    if (remarks !== undefined) updates.remarks = String(remarks || "").trim();
-    if (payload.receiptUrls !== undefined) {
-      const urls = (Array.isArray(payload.receiptUrls) ? payload.receiptUrls : []).map((u) => String(u || "").trim()).filter(Boolean);
-      for (const u of urls) { if (!/^https:\/\//i.test(u)) throw new HttpsError("invalid-argument", "A receipt link is not valid."); }
-      updates.receiptUrls = urls;
-      updates.receiptUrl = urls[0] || "";
-    } else if (payload.receiptUrl !== undefined) {
-      updates.receiptUrl = String(payload.receiptUrl || "").trim();
-    }
-    await expenseRef.set(updates, { merge: true });
-    await writeAudit(`${status} expense`, "Expense", `${expenseId} · ${status} · ${adminComment || "No comment"}`, caller);
-    return { ok: true };
-  }
-  if (action === "createEvent" || action === "updateEvent") {
-    ensureRole(caller.profile, DIRECTORY_EDITOR_ROLES);
-    const eventId = String(payload.id || payload.eventId || "").trim();
-    const name = String(payload.name || "").trim();
-    if (!name) throw new HttpsError("invalid-argument", "Event name is required.");
-    const status = String(payload.status || "Planning in progress");
-    if (!["Planning in progress", "Upcoming", "Active", "Completed"].includes(status)) throw new HttpsError("invalid-argument", "Choose a valid event status.");
-    if (eventId) {
-      const existing = await db.collection("events").doc(eventId).get();
-      if (existing.exists && isSettledEventData(existing.data())) throw new HttpsError("failed-precondition", "This event is settled; it can no longer be edited.");
-    }
-    const contributionAmount = Math.max(1, Number(payload.contributionAmount || 500));
-    const spocs = Array.isArray(payload.spocs) ? payload.spocs.filter((item) => item && item.floor && item.flat).map((item) => {
-      const upiId = String(item.upiId || "").trim();
-      if (upiId && !/^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z][a-zA-Z0-9.\-_]{1,64}$/.test(upiId)) throw new HttpsError("invalid-argument", `Enter a valid UPI ID for the Floor ${item.floor} SPOC, e.g. name@okaxis.`);
-      return { floor: String(item.floor).trim(), flat: String(item.flat).trim(), ...(upiId ? { upiId } : {}) };
-    }) : [];
-    // Up to two distinct SPOCs per floor.
-    const flatsByFloor = new Map();
-    spocs.forEach(({ floor, flat }) => {
-      const flats = flatsByFloor.get(floor) || [];
-      if (flats.includes(flat.toUpperCase())) throw new HttpsError("invalid-argument", `Flat ${flat} is chosen twice as SPOC for Floor ${floor}.`);
-      flats.push(flat.toUpperCase());
-      if (flats.length > 2) throw new HttpsError("invalid-argument", `Floor ${floor} can have at most two SPOCs.`);
-      flatsByFloor.set(floor, flats);
-    });
-    if (/^active$/i.test(status)) {
-      const residentFloors = new Set((await db.collection("residents").get()).docs.map((entry) => String(entry.data().floor || "Unassigned")));
-      const spocFloors = new Set(spocs.map((entry) => String(entry.floor)));
-      if (!residentFloors.size || [...residentFloors].some((floor) => !spocFloors.has(floor))) throw new HttpsError("failed-precondition", "Assign one SPOC for every floor before activating an event.");
-    }
-
-    const eventRef = eventId ? db.collection("events").doc(eventId) : db.collection("events").doc();
-    const isNew = !eventId;
-    const eventData = {
-      id: eventRef.id,
-      name,
-      date: String(payload.date || ""),
-      description: String(payload.description || ""),
-      status,
-      active: /^active$/i.test(status),
-      contributionAmount,
-      spocs,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    };
-    if (isNew) {
-      eventData.createdAt = admin.firestore.FieldValue.serverTimestamp();
-      eventData.createdBy = caller.email;
-      eventData.settlementStatus = "Open";
-      eventData.commonPoolCarryForward = 0;
-    }
-
-    if (/^active$/i.test(status)) {
-      const existingEvents = await db.collection("events").get();
-      const batch = db.batch();
-      existingEvents.docs.forEach((entry) => {
-        // Never demote a completed/closed/settled (past) event back to "Upcoming".
-        if (entry.id === eventRef.id || isClosedEventData(entry.data())) return;
-        batch.set(entry.ref, { active: false, status: "Upcoming", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-      });
-      batch.set(eventRef, eventData, { merge: true });
-      await batch.commit();
-    } else {
-      await eventRef.set(eventData, { merge: true });
-    }
-    const auditText = isNew ? "Created event" : "Updated event";
-    await writeAudit(auditText, "Event", `${name} (₹${contributionAmount}/flat)`, caller);
-    return { id: eventRef.id, isNew };
-  }
-  if (action === "activateEvent") {
-    ensureRole(caller.profile, DIRECTORY_EDITOR_ROLES);
-    const eventId = String(payload.eventId || "");
-    const eventRef = db.collection("events").doc(eventId);
-    const event = await eventRef.get();
-    if (!event.exists) throw new HttpsError("not-found", "Event not found.");
-    if (isSettledEventData(event.data())) throw new HttpsError("failed-precondition", "A settled or closed event cannot be re-activated.");
-    const residentFloors = new Set((await db.collection("residents").get()).docs.map((entry) => String(entry.data().floor || "Unassigned")));
-    const spocFloors = new Set((Array.isArray(event.data().spocs) ? event.data().spocs : []).filter((entry) => entry?.floor && entry?.flat).map((entry) => String(entry.floor)));
-    if (!residentFloors.size || [...residentFloors].some((floor) => !spocFloors.has(floor))) throw new HttpsError("failed-precondition", "Assign one SPOC for every floor before activating this event.");
-    const events = await db.collection("events").get();
-    const batch = db.batch();
-    events.docs.forEach((entry) => {
-      // Never demote a completed/closed/settled (past) event back to "Upcoming".
-      if (entry.id === eventId || isClosedEventData(entry.data())) return;
-      batch.set(entry.ref, { active: false, status: "Upcoming", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-    });
-    batch.set(eventRef, { active: true, status: "Active", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-    await batch.commit();
-    await writeAudit("Activated event", "Event", String(event.data().name || eventId), caller);
-    return { ok: true };
-  }
-  if (action === "completeEvent") {
-    ensureRole(caller.profile, DIRECTORY_EDITOR_ROLES);
-    const eventId = String(payload.eventId || "");
-    const eventRef = db.collection("events").doc(eventId);
-    const event = await eventRef.get();
-    if (!event.exists) throw new HttpsError("not-found", "Event not found.");
-    await eventRef.set({ status: "Completed", active: false, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-    await writeAudit("Marked event as completed", "Event", String(event.data().name || eventId), caller);
-    return { ok: true };
-  }
-  if (action === "saveCommittee") {
-    ensureRole(caller.profile, ADMIN_ROLES);
-    const name = String(payload.name || "").trim();
-    if (!name) throw new HttpsError("invalid-argument", "Committee member name is required.");
-    const memberRef = payload.id ? db.collection("committee").doc(String(payload.id)) : db.collection("committee").doc();
-    await memberRef.set({ id: memberRef.id, name, role: String(payload.role || "Committee member"), flat: String(payload.flat || ""), phone: String(payload.phone || ""), email: String(payload.email || ""), photoUrl: String(payload.photoUrl || ""), visible: payload.visible !== false, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-    await writeAudit(payload.id ? "Updated committee member" : "Added committee member", "Committee", name, caller);
-    return { id: memberRef.id };
-  }
-  if (action === "deleteCommittee") {
-    ensureRole(caller.profile, ADMIN_ROLES);
-    await db.collection("committee").doc(String(payload.id)).delete();
-    await writeAudit("Removed committee member", "Committee", String(payload.name || payload.id), caller);
-    return { ok: true };
-  }
-  if (action === "publishNotice") {
-    ensureRole(caller.profile, ADMIN_ROLES);
-    const title = String(payload.title || "").trim();
-    if (!title) throw new HttpsError("invalid-argument", "Notice title is required.");
-    const noticeRef = db.collection("notices").doc();
-    await noticeRef.set({ id: noticeRef.id, title, body: String(payload.body || ""), type: String(payload.type || "Update"), priority: String(payload.priority || "Normal"), expiresAt: String(payload.expiresAt || ""), published: true, publishedAt: admin.firestore.FieldValue.serverTimestamp(), publishedBy: caller.email });
-    await writeAudit("Published notice", "Notice", `${title} · ${payload.priority || "Normal"}`, caller);
-    // Notify every resident that a new notice was published.
-    await notifyRecipients(await allResidentEmails(), { type: "notice", noticeId: noticeRef.id, title: `New notice: ${title}`, body: String(payload.body || "").slice(0, 160) });
-    return { id: noticeRef.id };
-  }
-  if (action === "approveExpense") {
-    ensureRole(caller.profile, FINANCE_ROLES);
-    const eventId = String(payload.eventId || ""); const expenseId = String(payload.expenseId || "");
-    await db.collection("events").doc(eventId).collection("expenses").doc(expenseId).set({ status: "Approved", approvedBy: caller.email, approvedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-    await writeAudit("Approved expense", "Expense", `${expenseId} · ${eventId}`, caller);
-    return { ok: true };
-  }
-  if (action === "settlementSummary") {
-    ensureRole(caller.profile, FINANCE_ROLES);
-    const events = await db.collection("events").get();
-    // M-3: for a CLOSED event whose figures were frozen at settlement, reuse the
-    // stored settlementFigures instead of re-reading its contributions/expenses
-    // sub-collections (which never change again). Only open events — and closed
-    // events missing the snapshot — read live figures.
-    const settlements = await Promise.all(events.docs.map(async (entry) => {
-      const data = entry.data();
-      if (isClosedEventData(data) && data.settlementFigures) {
-        return { id: entry.id, ...data, ...data.settlementFigures };
-      }
-      return { id: entry.id, ...data, ...(await eventFigures(entry.id)) };
-    }));
-    const fund = await db.collection("system").doc("communityFund").get();
-    return { settlements, commonPool: Number(fund.data()?.balance || 0) };
-  }
-  if (action === "confirmSettlement") {
-    ensureRole(caller.profile, ["super_admin", "treasurer"]);
-    const eventId = String(payload.eventId || ""); const figures = await eventFigures(eventId);
-    if (figures.pendingExpenses) throw new HttpsError("failed-precondition", "Approve pending expenses before confirming settlement.");
-    await db.collection("events").doc(eventId).set({ settlementStatus: "Treasurer confirmed", settlementConfirmedBy: caller.email, settlementConfirmedAt: admin.firestore.FieldValue.serverTimestamp(), settlementFigures: figures }, { merge: true });
-    await writeAudit("Treasurer confirmed settlement", "Event", `${eventId} · ${figures.balance}`, caller);
-    return figures;
-  }
-  if (action === "allocateCommonPool") {
-    ensureRole(caller.profile, ADMIN_ROLES);
-    const eventId = String(payload.eventId || "");
-    const amount = Number(payload.amount || 0);
-    if (!eventId || !Number.isFinite(amount) || amount <= 0) throw new HttpsError("invalid-argument", "Enter a valid common-pool allocation amount.");
-    const eventRef = db.collection("events").doc(eventId);
-    const fundRef = db.collection("system").doc("communityFund");
-    let remainingPool = 0;
-    await db.runTransaction(async (transaction) => {
-      const [event, fund] = await Promise.all([transaction.get(eventRef), transaction.get(fundRef)]);
-      if (!event.exists) throw new HttpsError("not-found", "Event not found.");
-      if (/closed|settled/i.test(String(event.data().status || ""))) throw new HttpsError("failed-precondition", "A closed event cannot receive common-pool funds.");
-      const currentPool = Number(fund.data()?.balance || 0);
-      if (amount > currentPool) throw new HttpsError("failed-precondition", `Only ₹${Math.round(currentPool).toLocaleString("en-IN")} is currently available in the common pool.`);
-      remainingPool = currentPool - amount;
-      transaction.set(fundRef, { balance: remainingPool, updatedAt: admin.firestore.FieldValue.serverTimestamp(), lastAllocationEventId: eventId }, { merge: true });
-      transaction.set(eventRef, { commonPoolAllocation: Number(event.data().commonPoolAllocation || 0) + amount, commonPoolAllocatedAt: admin.firestore.FieldValue.serverTimestamp(), commonPoolAllocatedBy: caller.email }, { merge: true });
-    });
-    await writeAudit("Allocated common-pool funds", "Event", `${eventId} · ₹${amount}`, caller);
-    return { amount, commonPoolBalance: remainingPool };
-  }
-  if (action === "closeSettlement") {
-    ensureRole(caller.profile, ADMIN_ROLES);
-    const eventId = String(payload.eventId || ""); const eventRef = db.collection("events").doc(eventId); const event = await eventRef.get();
-    if (!event.exists) throw new HttpsError("not-found", "Event not found.");
-    if (event.data().settlementStatus !== "Treasurer confirmed" && caller.profile.role !== "super_admin") throw new HttpsError("failed-precondition", "Treasurer confirmation is required before closure.");
-    const figures = await eventFigures(eventId); const fundRef = db.collection("system").doc("communityFund");
-    // Read the fund balance INSIDE the transaction (mirrors allocateCommonPool) so a
-    // concurrent allocation/closure can't be clobbered by a stale read-modify-write.
-    let nextPool = 0;
-    await db.runTransaction(async (transaction) => { const fund = await transaction.get(fundRef); nextPool = Number(fund.data()?.balance || 0) + figures.balance; transaction.set(eventRef, { status: "Closed", active: false, settlementStatus: "Closed", closedBy: caller.email, closedAt: admin.firestore.FieldValue.serverTimestamp(), settlementFigures: figures, commonPoolCarryForward: figures.balance }, { merge: true }); transaction.set(fundRef, { balance: nextPool, updatedAt: admin.firestore.FieldValue.serverTimestamp(), lastEventId: eventId }, { merge: true }); });
-    await writeAudit("Closed event settlement", "Event", `${eventId} · carry forward ${figures.balance}`, caller);
-    return { ...figures, commonPoolBalance: nextPool };
-  }
-  if (action === "bookAmenity") {
-    ensureActive(caller.profile);
-    const AMENITIES = ["Party Hall", "Amphitheater", "Sauna"];
-    const amenity = String(payload.amenity || "").trim();
-    const date = String(payload.date || "").trim();
-    const slot = String(payload.slot || "Full day").trim();
-    const flat = String(payload.flat || "").trim();
-    const floor = String(payload.floor || "").trim();
-    const name = String(payload.name || caller.profile.name || "").trim();
-    const phone = String(payload.phone || "").trim();
-    const notes = String(payload.notes || "").trim();
-    const AMENITY_FEES = { "Party Hall": 2500, "Amphitheater": 2500, "Sauna": 1500 };
-    const fee = AMENITY_FEES[amenity] || Number(payload.fee) || 0;
-    if (!AMENITIES.includes(amenity) || !date || !flat) throw new HttpsError("invalid-argument", "Choose an amenity, date, and flat number.");
-
-    // Slot-clash guard: a slot already taken for this amenity+date can't be re-booked.
-    const requested = slot.split(",").map((s) => s.trim()).filter(Boolean);
-    const existingSnap = await db.collection("amenityBookings").where("amenity", "==", amenity).where("date", "==", date).get();
-    const active = existingSnap.docs.map((d) => d.data()).filter((b) => !["Rejected", "Cancelled"].includes(String(b.status || "")));
-    const takenTokens = new Set();
-    let fullDayTaken = false;
-    active.forEach((b) => {
-      const toks = String(b.slot || "").split(",").map((s) => s.trim());
-      if (toks.includes("Full day")) fullDayTaken = true;
-      toks.forEach((t) => takenTokens.add(t));
-    });
-    const clashes = requested.some((r) => (r === "Full day" ? active.length > 0 : (fullDayTaken || takenTokens.has(r))));
-    if (clashes) throw new HttpsError("failed-precondition", "One or more of those time slots are already booked for that date. Please pick a free slot.");
-
-    // For testing (no association / payment yet) bookings are CONFIRMED immediately — no
-    // committee approval. TODO: when the association enforces a fee, hold as "Pending
-    // payment" and only flip to Confirmed once payment to the association is recorded.
-    const ref = db.collection("amenityBookings").doc();
-    const booking = { id: ref.id, amenity, date, slot, flat, floor, name, phone, notes, fee, status: "Confirmed", requestedBy: caller.email, createdAt: admin.firestore.FieldValue.serverTimestamp() };
-    await ref.set(booking);
-    await writeAudit("Booked amenity", "Amenity", `${amenity} · ${date} · ${slot} · Flat ${flat}`, caller);
-    // The whole community is notified that a slot is now taken.
-    await notifyRecipients(await allResidentEmails(), { type: "amenity", title: `${amenity} booked`, body: `${amenity} on ${date} (${slot}) — booked by Flat ${flat}.` });
-    return { id: ref.id };
-  }
-  if (action === "updateAmenityBooking") {
-    ensureRole(caller.profile, ADMIN_ROLES);
-    const id = String(payload.id || "").trim();
-    const status = String(payload.status || "Approved").trim();
-    if (!id) throw new HttpsError("invalid-argument", "Booking ID is required.");
-    await db.collection("amenityBookings").doc(id).set({ status, updatedBy: caller.email, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-    await writeAudit(`${status} amenity booking`, "Amenity", `${id} · ${status}`, caller);
-    return { ok: true };
-  }
-  if (action === "requestMoveService") {
-    ensureActive(caller.profile);
-    const moveType = String(payload.moveType || "Move-In").trim();
-    const flat = String(payload.flat || "").trim();
-    const block = String(payload.block || "Block A").trim();
-    const residentName = String(payload.residentName || "").trim();
-    const occupancyType = String(payload.occupancyType || "Owner").trim();
-    const moveDate = String(payload.moveDate || "").trim();
-    const leasePeriod = String(payload.leasePeriod || "").trim();
-    const primaryMobile = String(payload.primaryMobile || "").trim();
-    const primaryEmail = String(payload.primaryEmail || "").trim();
-    const emergencyName = String(payload.emergencyName || "").trim();
-    const emergencyRelation = String(payload.emergencyRelation || "").trim();
-    const emergencyMobile = String(payload.emergencyMobile || "").trim();
-    const fourWheelerNo = String(payload.fourWheelerNo || "").trim();
-    const twoWheelerNo = String(payload.twoWheelerNo || "").trim();
-    const expectedTime = String(payload.expectedTime || "").trim();
-    const shiftingAgencyName = String(payload.shiftingAgencyName || "").trim();
-    const shiftingAgencyContact = String(payload.shiftingAgencyContact || "").trim();
-    const familyMembers = Array.isArray(payload.familyMembers) ? payload.familyMembers : [];
-    const domesticStaff = Array.isArray(payload.domesticStaff) ? payload.domesticStaff : [];
-    const documentsSubmitted = Array.isArray(payload.documentsSubmitted) ? payload.documentsSubmitted : [];
-    const undertakingAccepted = payload.undertakingAccepted === true;
-    const declarationAccepted = payload.declarationAccepted === true;
-
-    if (!flat || !moveDate || !residentName) throw new HttpsError("invalid-argument", "Select flat, resident name, and move date.");
-    if (!undertakingAccepted || !declarationAccepted) throw new HttpsError("invalid-argument", "You must accept the Community Guidelines & Undertaking to submit.");
-
-    const ref = db.collection("moveRequests").doc();
-    const requestData = {
-      id: ref.id,
-      moveType,
-      flat,
-      block,
-      residentName,
-      occupancyType,
-      moveDate,
-      leasePeriod,
-      primaryMobile,
-      primaryEmail,
-      emergencyName,
-      emergencyRelation,
-      emergencyMobile,
-      fourWheelerNo,
-      twoWheelerNo,
-      expectedTime,
-      shiftingAgencyName,
-      shiftingAgencyContact,
-      garbageWasteAmount: Number(payload.garbageWasteAmount || 0),
-      familyMembers,
-      domesticStaff,
-      documentsSubmitted,
-      undertakingAccepted,
-      declarationAccepted,
-      status: "Requested",
-      nocIssued: false,
-      requestedBy: caller.email,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
-    };
-    await ref.set(requestData);
-    await writeAudit(`Submitted ${moveType} Registration & Undertaking`, "Move Management", `Flat ${flat} · ${residentName} · ${moveDate}`, caller);
-    return { id: ref.id };
-  }
-  if (action === "updateMoveService") {
-    ensureRole(caller.profile, ADMIN_ROLES);
-    const id = String(payload.id || "").trim();
-    const status = String(payload.status || "Approved").trim();
-    const nocIssued = payload.nocIssued === true;
-    if (!id) throw new HttpsError("invalid-argument", "Move request ID is required.");
-    await db.collection("moveRequests").doc(id).set({ status, nocIssued, updatedBy: caller.email, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-    await writeAudit(`Updated ${status} NOC request`, "Move Management", `${id} · NOC: ${nocIssued ? "Issued" : "Pending"}`, caller);
-    return { ok: true };
-  }
-  if (action === "saveEmergencyContact") {
-    ensureRole(caller.profile, MANAGER_ROLES); // managers (assistant staff) maintain emergency contacts
-    const name = String(payload.name || "").trim();
-    const role = String(payload.role || "Emergency Contact").trim();
-    const phone = String(payload.phone || "").trim();
-    const photoUrl = String(payload.photoUrl || "").trim();
-    const availability = String(payload.availability || "24/7 Available").trim();
-    const contactType = ["emergency", "daily_helper"].includes(String(payload.contactType || "").trim()) ? String(payload.contactType).trim() : "emergency";
-    if (!name) throw new HttpsError("invalid-argument", "Contact name is required.");
-    if (contactType === "emergency" && !phone) throw new HttpsError("invalid-argument", "A mobile number is required for emergency contacts.");
-    const ref = payload.id ? db.collection("emergencyContacts").doc(String(payload.id)) : db.collection("emergencyContacts").doc();
-    await ref.set({ id: ref.id, name, role, phone, photoUrl, availability, contactType, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-    await writeAudit(payload.id ? "Updated emergency contact" : "Added emergency contact", "Contacts", `${name} · ${role} · ${contactType}`, caller);
-    return { id: ref.id };
-  }
-  if (action === "deleteEmergencyContact") {
-    ensureRole(caller.profile, MANAGER_ROLES); // managers (assistant staff) maintain emergency contacts
-    await db.collection("emergencyContacts").doc(String(payload.id)).delete();
-    await writeAudit("Removed emergency contact", "Contacts", String(payload.name || payload.id), caller);
-    return { ok: true };
-  }
-  if (action === "saveGalleryPhoto") {
-    ensureRole(caller.profile, ADMIN_ROLES);
-    const title = String(payload.title || "").trim();
-    const category = String(payload.category || "Events").trim();
-    const photoUrl = String(payload.photoUrl || "").trim();
-    const caption = String(payload.caption || "").trim();
-    if (!title || !photoUrl) throw new HttpsError("invalid-argument", "Photo title and image URL are required.");
-    const ref = payload.id ? db.collection("galleryPhotos").doc(String(payload.id)) : db.collection("galleryPhotos").doc();
-    await ref.set({ id: ref.id, title, category, photoUrl, caption, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-    await writeAudit(payload.id ? "Updated gallery photo" : "Uploaded gallery photo", "Gallery", `${title} · ${category}`, caller);
-    return { id: ref.id };
-  }
-  if (action === "deleteGalleryPhoto") {
-    ensureRole(caller.profile, ADMIN_ROLES);
-    await db.collection("galleryPhotos").doc(String(payload.id)).delete();
-    await writeAudit("Deleted gallery photo", "Gallery", String(payload.title || payload.id), caller);
-    return { ok: true };
-  }
-  if (action === "getExpansionData") {
-    ensureActive(caller.profile);
-    const [bookings, moves, contacts, photos] = await Promise.all([
-      db.collection("amenityBookings").get(),
-      db.collection("moveRequests").get(),
-      db.collection("emergencyContacts").get(),
-      db.collection("galleryPhotos").get()
-    ]);
-    return {
-      amenityBookings: bookings.docs.map((d) => ({ id: d.id, ...d.data() })),
-      moveRequests: moves.docs.map((d) => ({ id: d.id, ...d.data() })),
-      emergencyContacts: contacts.docs.map((d) => ({ id: d.id, ...d.data() })),
-      galleryPhotos: photos.docs.map((d) => ({ id: d.id, ...d.data() }))
-    };
-  }
-  if (action === "verifyDataSync") {
-    ensureRole(caller.profile, ADMIN_ROLES);
-    const [eventsSnap, noticesSnap, residentsSnap, committeeSnap, usersSnap, invitesSnap, migrationSnap] = await Promise.all([
-      db.collection("events").get(),
-      db.collection("notices").get(),
-      db.collection("residents").get(),
-      db.collection("committee").get(),
-      db.collection("users").get(),
-      db.collection("accessInvites").get(),
-      db.collection("system").doc("migration").get()
-    ]);
-    let totalExpenses = 0;
-    let totalContributions = 0;
-    const duplicatesReport = [];
-
-    for (const eventDoc of eventsSnap.docs) {
-      const eventData = eventDoc.data();
-      const [exp, con] = await Promise.all([
-        db.collection("events").doc(eventDoc.id).collection("expenses").get(),
-        db.collection("events").doc(eventDoc.id).collection("contributions").get()
-      ]);
-      totalExpenses += exp.size;
-      totalContributions += con.size;
-
-      const flatMap = new Map();
-      con.docs.forEach((doc) => {
-        const d = doc.data();
-        const flat = String(d.flat || d.flatNo || "").trim().toUpperCase();
-        if (!flat) return;
-        if (!flatMap.has(flat)) flatMap.set(flat, []);
-        flatMap.get(flat).push({
-          id: doc.id,
-          flat,
-          amount: d.amount || 0,
-          ownerName: d.ownerName || d.name || d.residentName || "N/A",
-          paymentMode: d.paymentMode || d.mode || "N/A",
-          reference: d.reference || d.ref || d.transactionRef || "N/A",
-          date: d.date || d.createdAt || "N/A"
-        });
-      });
-
-      const eventDuplicates = [];
-      flatMap.forEach((records, flat) => {
-        if (records.length > 1) {
-          eventDuplicates.push({ flat, count: records.length, records });
-        }
-      });
-
-      if (eventDuplicates.length > 0) {
-        duplicatesReport.push({
-          eventId: eventDoc.id,
-          eventName: eventData.name || eventData.title || eventDoc.id,
-          active: Boolean(eventData.active),
-          duplicateCount: eventDuplicates.length,
-          flats: eventDuplicates
-        });
-      }
-    }
-
-    const residents = residentsSnap.docs.map(d => d.data());
-    const occupancyCounts = {
-      owner_occupied: residents.filter(r => String(r.occupancy || r.occupancyStatus || "").toLowerCase().includes("owner")).length,
-      tenant_occupied: residents.filter(r => String(r.occupancy || r.occupancyStatus || "").toLowerCase().includes("tenant")).length,
-      vacant: residents.filter(r => String(r.occupancy || r.occupancyStatus || "").toLowerCase().includes("vacant")).length,
-      unverified: residents.filter(r => String(r.occupancy || r.occupancyStatus || "").toLowerCase().includes("unverified")).length
-    };
-    return {
-      synced: true,
-      lastMigration: migrationSnap.exists ? migrationSnap.data() : null,
-      counts: {
-        events: eventsSnap.size,
-        notices: noticesSnap.size,
-        residents: residentsSnap.size,
-        committee: committeeSnap.size,
-        expenses: totalExpenses,
-        contributions: totalContributions,
-        users: usersSnap.size + invitesSnap.size
-      },
-      duplicatesReport,
-      occupancyBreakdown: occupancyCounts,
-      eventList: eventsSnap.docs.map(d => ({ id: d.id, name: d.data().name || d.data().title, date: d.data().date || d.data().startDate, active: d.data().active }))
-    };
-  }
-  if (action === "readPaymentReference") {
-    // Billed per image, so only the people who can record this event's payments may use it.
-    ensureActive(caller.profile);
-    const eventId = String(payload.eventId || "");
-    const eventSnap = eventId ? await db.collection("events").doc(eventId).get() : null;
-    if (!eventSnap?.exists) throw new HttpsError("not-found", "Event not found.");
-    if (!DIRECTORY_EDITOR_ROLES.includes(caller.profile.role) && !(await callerSpocFloors(caller, eventSnap.data())).length) throw new HttpsError("permission-denied", "Only this event's SPOCs, committee, or administrators can read payment screenshots.");
-    const bucket = admin.storage().bucket();
-    const match = String(payload.url || "").match(/^https:\/\/firebasestorage\.googleapis\.com\/v0\/b\/([^/]+)\/o\/([^?]+)/);
-    let path = "";
-    try { path = match ? decodeURIComponent(match[2]) : ""; } catch (e) { /* malformed URL */ }
-    if (!match || match[1] !== bucket.name || !path.startsWith(`event-receipts/${eventId}/`)) throw new HttpsError("invalid-argument", "Upload the payment screenshot first.");
-    try {
-      const file = bucket.file(path);
-      const [metadata] = await file.getMetadata();
-      if (!String(metadata.contentType || "").startsWith("image/")) return { reference: "" }; // PDFs etc.: enter manually
-      const [content] = await file.download();
-      return { reference: extractUpiReference(await detectImageText(content)) };
-    } catch (error) {
-      logger.warn(`readPaymentReference: ${error.message}`);
-      return { reference: "" };
-    }
-  }
-  if (action === "importSpreadsheet") {
-    ensureRole(caller.profile, ADMIN_ROLES);
-    const result = await processSnapshotData(payload || {});
-    await writeAudit("Imported spreadsheet data", "System", `Processed ${result.writes} records`, caller);
-    return result;
-  }
-  if (action === "backfillDirectoryAccess") {
-    ensureRole(caller.profile, ADMIN_ROLES);
-    const residents = await db.collection("residents").get();
-    const entries = [];
-    residents.docs.forEach((doc) => {
-      const r = doc.data();
-      const flat = r.flat || doc.id;
-      const ownerName = r.ownerName || r.name || "";
-      const tenantName = r.tenantName || "";
-      [r.ownerPrimaryEmail, r.ownerEmail, r.ownerSecondaryEmail].forEach((email) => { if (email) entries.push({ email, name: ownerName, residentType: "Owner", flat }); });
-      [r.tenantPrimaryEmail, r.tenantEmail, r.tenantSecondaryEmail].forEach((email) => { if (email) entries.push({ email, name: tenantName, residentType: "Tenant", flat }); });
-    });
-    const granted = await syncDirectoryAccess(entries);
-    await writeAudit("Backfilled directory access", "Access", `${granted.length} resident invites from directory (${residents.size} flats scanned)`, caller);
-    return { ok: true, granted: granted.length, scanned: residents.size, emails: granted };
-  }
-  if (action === "normalizeVehicleNumbers") {
-    ensureRole(caller.profile, ADMIN_ROLES);
-    const residents = await db.collection("residents").get();
-    let updatedFlats = 0;
-    let updatedVehicles = 0;
-    for (const doc of residents.docs) {
-      const vehicles = doc.data().vehicles;
-      if (!Array.isArray(vehicles) || !vehicles.length) continue;
-      let changed = false;
-      const normalized = vehicles.map((v) => {
-        const details = String(v.details || "").trim();
-        const upper = details.toUpperCase();
-        if (upper !== details) { changed = true; updatedVehicles += 1; }
-        return { ...v, details: upper };
-      });
-      if (changed) {
-        await doc.ref.set({ vehicles: normalized, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-        updatedFlats += 1;
-      }
-    }
-    if (updatedFlats) await bumpDirectoryVersion();
-    await writeAudit("Normalized vehicle numbers to uppercase", "Directory", `${updatedVehicles} vehicles across ${updatedFlats} flats`, caller);
-    return { ok: true, updatedFlats, updatedVehicles, scanned: residents.size };
-  }
-  throw new HttpsError("invalid-argument", "Unknown admin-console action.");
+  // hasOwn: never dispatch to inherited names like "constructor".
+  const handler = Object.hasOwn(ADMIN_ACTIONS, action) ? ADMIN_ACTIONS[action] : null;
+  if (!handler) throw new HttpsError("invalid-argument", "Unknown admin-console action.");
+  return handler({ caller, payload, request });
 });
 
 // Community Feedback & Ideas board: residents submit feature requests, bugs, and
