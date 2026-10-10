@@ -1,4 +1,4 @@
-const { onRequest, onCall, HttpsError } = require("firebase-functions/v2/https");
+const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { logger } = require("firebase-functions");
 const admin = require("firebase-admin");
 const crypto = require("crypto");
@@ -876,7 +876,7 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     // Permission check: Admins/Committee edit any flat's full profile; a verified
     // Homeowner edits their own flat's full profile; a verified Tenant may edit ONLY
     // their own tenant contact block (owner/flat fields are stripped below).
-    const isAdmin = [...ADMIN_ROLES, "committee"].includes(caller.profile.role);
+    const isAdmin = DIRECTORY_EDITOR_ROLES.includes(caller.profile.role);
     const callerEmail = String(caller.email || "").trim().toLowerCase();
     const callerFlatMatch = String(caller.profile.flat || "").trim().toUpperCase() === flat.toUpperCase();
     const ownerEmails = [before.ownerEmail, before.ownerPrimaryEmail, before.ownerSecondaryEmail].map((e) => String(e || "").trim().toLowerCase()).filter(Boolean);
@@ -1004,7 +1004,7 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     const before = snap.data() || {};
     const callerEmail = String(caller.email || "").trim().toLowerCase();
     const flatEmails = [before.ownerEmail, before.ownerPrimaryEmail, before.ownerSecondaryEmail, before.tenantEmail, before.tenantPrimaryEmail, before.tenantSecondaryEmail, before.familyContactEmail].map((e) => String(e || "").trim().toLowerCase()).filter(Boolean);
-    const isStaff = [...ADMIN_ROLES, "committee"].includes(caller.profile.role);
+    const isStaff = DIRECTORY_EDITOR_ROLES.includes(caller.profile.role);
     const belongsToFlat = flatEmails.includes(callerEmail) || String(caller.profile.flat || "").trim().toUpperCase() === flat.toUpperCase();
     if (!isStaff && !belongsToFlat) throw new HttpsError("permission-denied", "You can only update the vehicles for your own flat.");
     const vehicles = Array.isArray(payload.vehicles) ? payload.vehicles.map((item) => ({ type: ["Two wheeler", "Four wheeler"].includes(item.type) ? item.type : "Two wheeler", details: String(item.details || "").trim().toUpperCase() })).filter((item) => item.details) : [];

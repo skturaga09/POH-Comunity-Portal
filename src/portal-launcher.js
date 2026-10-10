@@ -53,7 +53,7 @@ const textOr = (value, fallback) => value == null || value === "" ? fallback : v
 const money = (value) => `₹${Math.round(Number(value || 0)).toLocaleString("en-IN")}`;
 const roleLabel = (role) => String(role || "resident").replace(/_/g, " ");
 const safeUrl = (value) => /^https:\/\//i.test(String(value || "")) ? String(value) : "";
-const financeRoles = new Set(["super_admin", "admin", "president", "treasurer"]);
+const financeRoles = new Set(["super_admin", "admin", "president", "treasurer", "committee"]);
 const adminRoles = new Set(["super_admin", "admin", "president"]);
 const ticketManagerRoles = new Set(["super_admin", "admin", "president", "manager"]);
 const directoryEditorRoles = new Set(["super_admin", "admin", "president", "committee"]);
@@ -370,20 +370,17 @@ function isClosed(event) {
 }
 function occupancyKey(resident) { return String(resident.occupancyStatus || resident.occupancy || "unverified").toLowerCase().replace(/[^a-z]+/g, "_").replace(/^_|_$/g, ""); }
 function residentName(resident) { return textOr(resident.displayName || resident.ownerName || resident.name || resident.tenantName, "Resident details pending"); }
+// Match a resident by flat/flatNo/id, ignoring case and leading zeros ("0410" = "410").
+function findResidentByFlat(flatVal) {
+  const normFlat = (value) => String(value || "").trim().replace(/^0+/, "").toUpperCase();
+  const norm = normFlat(flatVal);
+  if (!norm || !Array.isArray(portalData?.residents)) return null;
+  return portalData.residents.find((r) => normFlat(r.flat) === norm || normFlat(r.flatNo) === norm || normFlat(r.id) === norm) || null;
+}
+function residentFloors() { return [...new Set(portalData.residents.map((resident) => String(resident.floor || "Unassigned")))].sort(contributionFloorOrder); }
 function getFlatResidentName(flatVal, storedName) {
-  const norm = String(flatVal || "").trim().replace(/^0+/, "").toUpperCase();
-  let directoryName = "";
-  if (norm && Array.isArray(portalData?.residents)) {
-    const resident = portalData.residents.find((r) => {
-      const rFlat = String(r.flat || "").trim().replace(/^0+/, "").toUpperCase();
-      const rFlatNo = String(r.flatNo || "").trim().replace(/^0+/, "").toUpperCase();
-      const rId = String(r.id || "").trim().replace(/^0+/, "").toUpperCase();
-      return rFlat === norm || rFlatNo === norm || rId === norm;
-    });
-    if (resident) {
-      directoryName = residentName(resident);
-    }
-  }
+  const resident = findResidentByFlat(flatVal);
+  const directoryName = resident ? residentName(resident) : "";
 
   const cleanStored = String(storedName || "").trim();
   const isGeneric = !cleanStored || /^(resident|resident ji|owner|owner not recorded|resident details pending|n\/a|none)?$/i.test(cleanStored);
@@ -434,7 +431,7 @@ function prepareContributionForm() {
   if (saveBtn) saveBtn.innerHTML = '<i class="fa-solid fa-circle-check" aria-hidden="true"></i> Save contribution';
   setupContributionAmount();
   syncPaymentReferenceFields();
-  const floors = [...new Set(portalData.residents.map((resident) => String(resident.floor || "Unassigned")))].sort(contributionFloorOrder);
+  const floors = residentFloors();
   byId("contributionFloor").disabled = false;
   byId("contributionFloor").innerHTML = `<option value="">Select floor</option>${floors.map((floor) => `<option value="${escapeHtml(floor)}">${escapeHtml(floor === "G" ? "Ground floor" : `Floor ${floor}`)}</option>`).join("")}`;
   byId("contributionFlat").innerHTML = "<option value=\"\">Select floor first</option>";
@@ -976,15 +973,7 @@ function switchAdminWorkspace(targetWorkspaceId) {
 
   workspaces.forEach((id) => {
     const element = byId(id);
-    if (element) {
-      if (id === "adminAccessWorkspace" && !canManageUsers) {
-        element.hidden = true;
-      } else if (id === "adminSettlementWorkspace" && !canManageFinance) {
-        element.hidden = true;
-      } else {
-        element.hidden = (id !== currentAdminWorkspace);
-      }
-    }
+    if (element) element.hidden = id !== currentAdminWorkspace;
   });
 
   document.querySelectorAll("[data-admin-nav-workspace]").forEach((button) => {
@@ -1031,12 +1020,6 @@ function renderAdmin() {
     return `<li class="admin-event-row"><div><strong>${escapeHtml(eventTitle(event))}</strong><span>${escapeHtml(eventStatus(event))}${amountStr}${event.date ? ` · ${escapeHtml(eventDetail(event))}` : ""}</span></div><div style="display:flex;align-items:center;">${statusBadge}${editBtn}${activateBtn}${completeBtn}</div></li>`;
   }).join("") : "<li>No events available</li>";
   byId("adminRoleBadge").textContent = roleLabel(approvedProfile?.role || "administrator");
-  const canManageUsers = ["super_admin", "admin"].includes(approvedProfile?.role);
-  const navAccessOption = byId("navAccessOption");
-  if (navAccessOption) navAccessOption.hidden = !canManageUsers;
-  const canManageFinance = financeRoles.has(approvedProfile?.role);
-  const navSettlementOption = byId("navSettlementOption");
-  if (navSettlementOption) navSettlementOption.hidden = !canManageFinance;
   switchAdminWorkspace(currentAdminWorkspace);
   const floors = [...new Set(portalData.residents.map((resident) => String(resident.floor || "Unassigned")))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   byId("adminSpocFields").innerHTML = floors.map((floor) => {
@@ -1128,7 +1111,7 @@ function renderAdmin() {
 }
 
 function auditTime(value) { return value?.toMillis ? value.toMillis() : Date.parse(value || "") || 0; }
-function auditLabel(value) { const date = value?.toDate ? value.toDate() : value ? new Date(value) : null; return date && !Number.isNaN(date.valueOf()) ? date.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "Just now"; }
+function auditLabel(value) { return feedbackDate(value); }
 
 function renderFloorProgress(finance) {
   const totals = new Map();
@@ -1185,7 +1168,7 @@ function checkIsSpocOrAdmin(event) {
     return f && candidateFlats.includes(f);
   });
   const isSpoc = Boolean(spocMatch);
-  const spocFloor = spocMatch ? String(spocMatch.floor || userFloor) : (isSpoc ? userFloor : null);
+  const spocFloor = spocMatch ? String(spocMatch.floor || userFloor) : null;
 
   return { canView: isAdmin || isSpoc, userSpocFloor: spocFloor || userFloor || null, isAdmin, isSpoc };
 }
@@ -1203,7 +1186,7 @@ function renderSpocFloorMatrix(event) {
   }
   section.hidden = false;
 
-  const floors = [...new Set(portalData.residents.map((r) => String(r.floor || "Unassigned")))].sort(contributionFloorOrder);
+  const floors = residentFloors();
 
   if (!selectedSpocMatrixFloor || !floors.includes(selectedSpocMatrixFloor)) {
     selectedSpocMatrixFloor = access.userSpocFloor && floors.includes(access.userSpocFloor) ? access.userSpocFloor : (floors[0] || "1");
@@ -1705,10 +1688,6 @@ async function enterPortal(user) {
   if (byId("adminNavWrap")) byId("adminNavWrap").hidden = !hasAdminAccess;
   if (byId("adminNav")) byId("adminNav").hidden = !hasAdminAccess;
   if (byId("moreSheetAdmin")) byId("moreSheetAdmin").hidden = !hasAdminAccess;
-  const canManageUsers = ["super_admin", "admin"].includes(approvedProfile?.role);
-  if (byId("navAccessOption")) byId("navAccessOption").hidden = !canManageUsers;
-  const canManageFinance = financeRoles.has(approvedProfile?.role);
-  if (byId("navSettlementOption")) byId("navSettlementOption").hidden = !canManageFinance;
   byId("eventCreateNote").hidden = !hasAdminAccess;
   try {
     activeEventId = null;
@@ -1839,26 +1818,21 @@ function alignExpenseFormWithPortal() {
   }
 }
 
+// Hide the reference field (and clear it) when the form's payment mode is Cash.
+function syncReferenceField(formId) {
+  const form = byId(formId);
+  const reference = form?.elements.reference;
+  const container = reference?.closest("label");
+  if (!container) return;
+  const cash = form.elements.paymentMode?.value === "Cash";
+  // `.form-grid label { display:flex !important }` overrides both [hidden] and a
+  // plain inline display, so hide with an inline !important that wins.
+  hideRefContainer(container, cash);
+  if (cash) reference.value = "";
+}
 function syncPaymentReferenceFields() {
-  const contributionForm = byId("contributionForm");
-  const contributionReference = contributionForm?.elements.reference;
-  const contributionContainer = contributionReference?.closest("label");
-  if (contributionContainer) {
-    contributionContainer.id = "contributionReferenceContainer";
-    const cash = contributionForm.elements.paymentMode?.value === "Cash";
-    // `.form-grid label { display:flex !important }` overrides both [hidden] and a
-    // plain inline display, so hide with an inline !important that wins.
-    hideRefContainer(contributionContainer, cash);
-    if (cash) contributionReference.value = "";
-  }
-  const expenseForm = byId("expenseForm");
-  const expenseReference = expenseForm?.elements.reference;
-  const expenseContainer = expenseReference?.closest("label");
-  if (expenseContainer) {
-    const cash = expenseForm.elements.paymentMode?.value === "Cash";
-    hideRefContainer(expenseContainer, cash);
-    if (cash) expenseReference.value = "";
-  }
+  syncReferenceField("contributionForm");
+  syncReferenceField("expenseForm");
 }
 
 // Reliably show/hide a reference <label> despite the `!important` form-grid rule.
@@ -1953,7 +1927,6 @@ function showReceipts(urls) {
 }
 
 // Backward-compatible single-receipt entry point.
-function showReceipt(url) { showReceipts([url]); }
 
 // Mirror the Apps Script experience: every meaningful button press gives immediate
 // feedback, while the async save/load functions keep the loader visible as needed.
@@ -2014,12 +1987,6 @@ byId("directoryFloorTabs").addEventListener("click", (event) => {
   renderDirectory();
 });
 byId("directoryGrid").addEventListener("click", (event) => {
-  const editId = event.target.closest("[data-edit-resident]")?.dataset.editResident;
-  if (editId) {
-    const resident = portalData.residents.find((entry) => entry.id === editId);
-    if (resident) openResidentEditor(resident);
-    return;
-  }
   const viewId = event.target.closest("[data-view-resident]")?.dataset.viewResident;
   const resident = portalData.residents.find((entry) => entry.id === viewId);
   if (resident) openResidentProfile(resident);
@@ -2572,7 +2539,7 @@ function prepareAdditionalContributionForm() {
   const form = byId("additionalContributionForm");
   if (!form) return;
   form.reset();
-  const floors = [...new Set(portalData.residents.map((resident) => String(resident.floor || "Unassigned")))].sort(contributionFloorOrder);
+  const floors = residentFloors();
   byId("additionalContributionFloor").innerHTML = `<option value="">Select floor</option>${floors.map((floor) => `<option value="${escapeHtml(floor)}">${escapeHtml(floor === "G" ? "Ground floor" : `Floor ${floor}`)}</option>`).join("")}`;
   byId("additionalContributionFlat").innerHTML = "<option value=\"\">Select floor first</option>";
   byId("additionalContributionFlat").disabled = true;
@@ -2596,16 +2563,7 @@ function populateAdditionalContributionOwner() {
   const resident = portalData.residents.find((entry) => String(entry.flat || entry.flatNo || "").trim().toUpperCase() === flat.toUpperCase());
   if (byId("additionalContributionOwner")) byId("additionalContributionOwner").value = resident ? residentName(resident) : "";
 }
-function syncAdditionalReferenceFields() {
-  const form = byId("additionalContributionForm");
-  const reference = form?.elements.reference;
-  const container = reference?.closest("label");
-  if (container) {
-    const cash = form.elements.paymentMode?.value === "Cash";
-    hideRefContainer(container, cash);
-    if (cash) reference.value = "";
-  }
-}
+function syncAdditionalReferenceFields() { syncReferenceField("additionalContributionForm"); }
 async function saveAdditionalContribution(event) {
   const form = byId("additionalContributionForm");
   const formData = new FormData(form);
@@ -2640,8 +2598,6 @@ byId("expenseForm").addEventListener("submit", (event) => { event.preventDefault
 byId("expenseList").addEventListener("click", (event) => {
   const multi = event.target.closest("[data-receipt-urls]")?.dataset.receiptUrls;
   if (multi) { try { showReceipts(JSON.parse(multi)); } catch (e) { console.error("Bad receipt list", e); } return; }
-  const url = event.target.closest("[data-receipt-url]")?.dataset.receiptUrl;
-  if (url) showReceipt(url);
 });
 byId("closeReceipt").addEventListener("click", () => byId("receiptModal").close());
 byId("receiptPrevBig")?.addEventListener("click", () => renderReceiptAt(receiptGallery.index - 1));
@@ -2651,7 +2607,6 @@ byId("receiptModal")?.addEventListener("keydown", (e) => {
   if (e.key === "ArrowLeft") { e.preventDefault(); renderReceiptAt(receiptGallery.index - 1); }
   else if (e.key === "ArrowRight") { e.preventDefault(); renderReceiptAt(receiptGallery.index + 1); }
 });
-byId("adminWorkspaceSelect")?.addEventListener("change", (event) => switchAdminWorkspace(event.target.value));
 byId("adminEventStatus").addEventListener("change", () => { byId("adminSpocHelper").textContent = byId("adminEventStatus").value === "Active" ? "Every floor requires an assigned SPOC before this event can be activated." : "Optional while planning or upcoming. Add SPOCs before the event is activated."; });
 function populateEventEditor(event) {
   const form = byId("adminEventForm");
@@ -2710,7 +2665,7 @@ byId("adminEventForm").addEventListener("submit", async (event) => {
     const upiInput = byId("adminSpocFields").querySelector(`[data-spoc-upi="${floor}"]`);
     return { floor, flat: select.value, upiId: String(upiInput?.value || "").trim() };
   }).filter((entry) => entry.flat);
-  const expectedFloors = [...new Set(portalData.residents.map((resident) => String(resident.floor || "Unassigned")))];
+  const expectedFloors = residentFloors();
   if (formData.get("status") === "Active" && spocs.length !== expectedFloors.length) { showToast("Assign one SPOC for every floor before activating this event.", "warning"); return; }
 
   const action = eventId ? "updateEvent" : "createEvent";
@@ -3739,10 +3694,13 @@ async function publishHelpdeskReport() {
 
 let currentReminderCardDetails = null;
 
-function getFloorSpocName(eventObj, floorStr) {
-  if (!eventObj || !floorStr) return "";
+function floorSpoc(eventObj, floorStr) {
+  if (!eventObj || !floorStr) return null;
   const spocs = Array.isArray(eventObj.spocs) ? eventObj.spocs : [];
-  const spocEntry = spocs.find((s) => String(s.floor ?? "").trim() === String(floorStr).trim());
+  return spocs.find((s) => String(s.floor ?? "").trim() === String(floorStr).trim()) || null;
+}
+function getFloorSpocName(eventObj, floorStr) {
+  const spocEntry = floorSpoc(eventObj, floorStr);
   if (!spocEntry) return "";
 
   // If spocEntry has an explicit name field, use it directly
@@ -3757,13 +3715,7 @@ function getFloorSpocName(eventObj, floorStr) {
 
   if (isFlatNumber) {
     // Look up the resident by flat number and return their name
-    const norm = flatVal.replace(/^0+/, "").toUpperCase();
-    const spocResident = portalData.residents.find((r) => {
-      const rFlat = String(r.flat || "").trim().replace(/^0+/, "").toUpperCase();
-      const rFlatNo = String(r.flatNo || "").trim().replace(/^0+/, "").toUpperCase();
-      const rId = String(r.id || "").trim().replace(/^0+/, "").toUpperCase();
-      return rFlat === norm || rFlatNo === norm || rId === norm;
-    });
+    const spocResident = findResidentByFlat(flatVal);
     return spocResident ? residentName(spocResident) : "";
   }
 
@@ -3774,9 +3726,7 @@ function getFloorSpocName(eventObj, floorStr) {
 // The floor SPOC's UPI ID for the pay-QR, taken from the event's own SPOC assignment
 // (entered at event setup) — not from resident profiles.
 function getFloorSpocUpi(eventObj, floorStr) {
-  if (!eventObj || !floorStr) return "";
-  const spocs = Array.isArray(eventObj.spocs) ? eventObj.spocs : [];
-  const entry = spocs.find((s) => String(s.floor ?? "").trim() === String(floorStr).trim());
+  const entry = floorSpoc(eventObj, floorStr);
   return entry ? String(entry.upiId || "").trim() : "";
 }
 
@@ -4255,8 +4205,6 @@ byId("moveFlatSelect")?.addEventListener("change", (e) => {
     if (byId("moveOccupancyType")) byId("moveOccupancyType").value = occupancyKey(resident) === "tenant_occupied" ? "Tenant" : "Owner";
     if (byId("movePrimaryMobile")) byId("movePrimaryMobile").value = resident.ownerMobile || resident.tenantMobile || resident.phone || "";
     if (byId("movePrimaryEmail")) byId("movePrimaryEmail").value = resident.email || "";
-    if (byId("moveFourWheeler")) byId("moveFourWheeler").value = resident.fourWheeler || resident.vehicles || "";
-    if (byId("moveTwoWheeler")) byId("moveTwoWheeler").value = resident.twoWheeler || "";
   }
 });
 
