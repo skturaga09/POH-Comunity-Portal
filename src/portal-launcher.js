@@ -2723,10 +2723,18 @@ function setSpocOverride(floor, anyFloor) {
   });
 }
 // Chip per floor: "Needs SPOC" until slot 1 or 2 is filled, so gaps are visible before activating.
+// Also keeps a floor's two slots distinct: the resident chosen in one slot is disabled in
+// the other, and a duplicate (e.g. from older saved data) is cleared from SPOC 2.
 function updateSpocStatuses() {
   const box = byId("adminSpocFields");
   box.querySelectorAll("[data-spoc-status]").forEach((chip) => {
-    const count = [...box.querySelectorAll(`select[data-spoc-floor="${CSS.escape(chip.dataset.spocStatus)}"]`)].filter((select) => select.value).length;
+    const selects = [...box.querySelectorAll(`select[data-spoc-floor="${CSS.escape(chip.dataset.spocStatus)}"]`)];
+    if (selects.length === 2 && selects[0].value && selects[0].value === selects[1].value) selects[1].value = "";
+    selects.forEach((select) => {
+      const taken = selects.filter((other) => other !== select).map((other) => other.value).filter(Boolean);
+      [...select.options].forEach((option) => { option.disabled = Boolean(option.value) && taken.includes(option.value); });
+    });
+    const count = selects.filter((select) => select.value).length;
     chip.textContent = count ? `${count} of 2 assigned` : "Needs SPOC";
     chip.classList.toggle("is-missing", !count);
   });
