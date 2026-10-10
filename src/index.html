@@ -428,7 +428,21 @@
   .app-sheet .sheet-grid button.emergency i{color:var(--danger)}
   .app-sheet .sheet-grid button:active{transform:scale(.95);border-color:var(--nav-active)}
 }
-/* == end Step 3 == */</style>
+/* == end Step 3 == */#adminSpocFields.spoc-grid{grid-template-columns:1fr;gap:12px}
+.spoc-floor{border:1px solid #e3e8df;border-radius:8px;background:#fffefb;padding:12px 14px}
+.spoc-floor-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.spoc-floor-head strong{font-size:14px;color:#17372c}
+.spoc-status{font-size:11px;font-weight:800;padding:3px 9px;border-radius:999px;background:#e7f4ec;color:#23584b}
+.spoc-status.is-missing{background:#fdf0ed;color:#9c3f34}
+.form-grid .spoc-any{flex-direction:row!important;align-items:center!important;gap:6px!important;margin-left:auto;font-size:12px;font-weight:700;color:#52685d;cursor:pointer}
+.form-grid .spoc-any input[type=checkbox]{width:16px!important;height:16px!important;padding:0!important;margin:0;accent-color:#183e35}
+.spoc-floor-slots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.spoc-optional{font-weight:600;color:#8b9a91}
+@media (max-width:640px){.spoc-floor-slots{grid-template-columns:1fr}.form-grid .spoc-any{margin-left:0}}
+:root[data-mode="dark"] .spoc-floor{border-color:#293530;background:#141b18}
+:root[data-mode="dark"] .spoc-floor-head strong{color:#edf3ee}
+:root[data-mode="dark"] .form-grid .spoc-any{color:#c6e4d2}
+</style>
 </head>
 <body>
   <button id="pohThemeToggle" type="button" aria-label="Switch between light and dark theme" title="Switch to dark theme" aria-pressed="false"><i class="fa-solid fa-moon" id="pohThemeIcon" aria-hidden="true"></i></button><header class="masthead"><div class="brand"><img src="/assets/poh-logo.jpeg" alt="Pursuit of Happiness logo" class="login-brand-logo"><div>Pursuit of Happiness <small>Community Portal</small></div></div><span class="secure">Private resident access</span></header>

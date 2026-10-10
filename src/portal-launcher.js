@@ -1042,9 +1042,10 @@ function renderAdmin() {
   const floors = [...new Set(portalData.residents.map((resident) => String(resident.floor || "Unassigned")))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   byId("adminSpocFields").innerHTML = floors.map((floor) => {
     const f = escapeHtml(floor);
-    const slot = (n) => `<label>Floor ${f} · SPOC ${n}${n === 2 ? " (optional)" : ""}<select data-spoc-floor="${f}" data-spoc-slot="${n}">${spocOptions(floor, false)}</select><input data-spoc-upi="${f}" data-spoc-slot="${n}" placeholder="UPI ID for pay-QR (e.g. name@okaxis)" style="margin-top:6px;"></label>`;
-    return `${slot(1)}${slot(2)}<label class="full" style="flex-direction:row;align-items:center;gap:8px;font-weight:600;"><input type="checkbox" data-spoc-any="${f}" style="width:auto;"> No suitable SPOC on Floor ${f}? Pick from any floor</label>`;
+    const slot = (n) => `<label><span>SPOC ${n}${n === 2 ? ' <span class="spoc-optional">· optional</span>' : ""}</span><select data-spoc-floor="${f}" data-spoc-slot="${n}" aria-label="Floor ${f} SPOC ${n}">${spocOptions(floor, false)}</select><input data-spoc-upi="${f}" data-spoc-slot="${n}" aria-label="Floor ${f} SPOC ${n} UPI ID" placeholder="UPI ID for pay-QR · name@okaxis"></label>`;
+    return `<section class="spoc-floor"><div class="spoc-floor-head"><strong>${escapeHtml(floor === "G" ? "Ground floor" : `Floor ${floor}`)}</strong><span class="spoc-status" data-spoc-status="${f}"></span><label class="spoc-any" title="Use when no one on this floor can be SPOC"><input type="checkbox" data-spoc-any="${f}"> Include other floors</label></div><div class="spoc-floor-slots">${slot(1)}${slot(2)}</div></section>`;
   }).join("") || empty("No resident floors are available.");
+  updateSpocStatuses();
   byId("adminCommitteeList").innerHTML = portalData.committee.length ? portalData.committee.map((member) => `<article class="admin-person"><span class="role-badge">${escapeHtml(textOr(member.role, "Committee member"))}</span><strong>${escapeHtml(textOr(member.name, "Name pending"))}</strong><small>${escapeHtml(textOr(member.flat, "Flat not recorded"))}</small><div class="record-actions"><button data-edit-committee="${escapeHtml(member.id)}" type="button" aria-label="Edit ${escapeHtml(textOr(member.name, "committee member"))}" title="Edit committee member"><i class="fa-solid fa-pen" aria-hidden="true"></i></button><button class="danger-icon" data-delete-committee="${escapeHtml(member.id)}" data-committee-name="${escapeHtml(member.name)}" type="button" aria-label="Remove ${escapeHtml(textOr(member.name, "committee member"))}" title="Remove committee member"><i class="fa-solid fa-trash-can" aria-hidden="true"></i></button></div></article>`).join("") : empty("No committee members have been added.");
   const accessSearchQuery = String(byId("adminAccessSearch")?.value || "").trim().toLowerCase();
   const accessRoleFilter = String(byId("adminAccessRoleFilter")?.value || "").trim().toLowerCase();
@@ -2721,13 +2722,24 @@ function setSpocOverride(floor, anyFloor) {
     select.value = value;
   });
 }
+// Chip per floor: "Needs SPOC" until slot 1 or 2 is filled, so gaps are visible before activating.
+function updateSpocStatuses() {
+  const box = byId("adminSpocFields");
+  box.querySelectorAll("[data-spoc-status]").forEach((chip) => {
+    const count = [...box.querySelectorAll(`select[data-spoc-floor="${CSS.escape(chip.dataset.spocStatus)}"]`)].filter((select) => select.value).length;
+    chip.textContent = count ? `${count} of 2 assigned` : "Needs SPOC";
+    chip.classList.toggle("is-missing", !count);
+  });
+}
 byId("adminSpocFields").addEventListener("change", (event) => {
   const toggle = event.target.closest("[data-spoc-any]");
   if (toggle) setSpocOverride(toggle.dataset.spocAny, toggle.checked);
+  updateSpocStatuses();
 });
 function clearSpocFields() {
   residentFloors().forEach((floor) => setSpocOverride(floor, false));
   byId("adminSpocFields").querySelectorAll("select[data-spoc-floor], [data-spoc-upi]").forEach((field) => { field.value = ""; });
+  updateSpocStatuses();
 }
 function populateEventEditor(event) {
   clearSpocFields();
@@ -2753,6 +2765,7 @@ function populateEventEditor(event) {
     const upiInput = byId("adminSpocFields")?.querySelector(`[data-spoc-upi="${CSS.escape(floor)}"][data-spoc-slot="${slot}"]`);
     if (upiInput) upiInput.value = entry.upiId || "";
   });
+  updateSpocStatuses();
 
   const titleHeading = byId("adminEventTitleHeading");
   if (titleHeading) titleHeading.textContent = `Edit Event: ${eventTitle(event)}`;
