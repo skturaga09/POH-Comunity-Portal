@@ -607,6 +607,28 @@ function ensureRole(profile, roles) {
   if (!roles.includes(profile.role)) throw new HttpsError("permission-denied", "You do not have permission for this portal action.");
 }
 
+// Maintenance mode. When the Firestore doc `system/maintenance` has `enabled === true`,
+// every caller is blocked EXCEPT super admins (role "super_admin", or the owner account),
+// so a super admin can still sign in and make changes while everyone else is held out.
+// Toggle it from the Firestore console (set enabled true/false) — no redeploy needed.
+// Fails OPEN on a read error, so a transient Firestore glitch never locks the whole
+// portal (super admins included) out.
+async function assertNotMaintenance(caller) {
+  let cfg;
+  try {
+    cfg = await db.collection("system").doc("maintenance").get();
+  } catch (e) {
+    return; // fail open — do not lock the portal because the flag couldn't be read
+  }
+  if (!cfg.exists || cfg.data().enabled !== true) return; // maintenance off
+  const role = caller.profile?.role || "";
+  const isOwner = String(caller.email || "").trim().toLowerCase() === "iamsanthoshkumar@gmail.com";
+  if (isOwner || role === "super_admin") return; // super admins are exempt
+  throw new HttpsError(
+    "unavailable",
+    cfg.data().message || "The POH portal is temporarily under maintenance. Please check back soon.",
+  );
+}
 
 // Resolve the caller's flat, preferring their profile, then matching their
 // email against any owner/tenant/family email in the directory.
@@ -751,6 +773,7 @@ exports.portalAccess = onCall({ region: "asia-south1" }, async (request) => {
   ensureReadPatch();
   const action = String(request.data?.action || "status");
   const caller = await callerProfile(request);
+  await assertNotMaintenance(caller);
   if (action === "status") {
     let prof = caller.profile;
     if (!prof) {
@@ -902,6 +925,7 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
   ensureReadPatch();
   const action = String(request.data?.action || "");
   const caller = await callerProfile(request);
+  await assertNotMaintenance(caller);
   const payload = request.data?.payload || {};
 
   if (action === "saveResidentProfile") {
@@ -1789,6 +1813,7 @@ exports.feedbackHub = onCall({ region: "asia-south1" }, async (request) => {
   ensureReadPatch();
   const action = String(request.data?.action || "list");
   const caller = await callerProfile(request);
+  await assertNotMaintenance(caller);
   ensureActive(caller.profile);
   const isModerator = MODERATOR_ROLES.includes(caller.profile.role);
   const payload = request.data?.payload || {};
@@ -2054,6 +2079,7 @@ function addReceiptLinkPage(pdf, font, bold, caption, url) {
 
 exports.generateEventReport = onCall({ region: "asia-south1", memory: "1GiB", timeoutSeconds: 120 }, async (request) => {
   const caller = await callerProfile(request);
+  await assertNotMaintenance(caller);
   ensureRole(caller.profile, FINANCE_ROLES);
   const eventId = String(request.data?.eventId || "");
   const eventRef = db.collection("events").doc(eventId);
@@ -2349,6 +2375,7 @@ exports.ticketHub = onCall({ region: "asia-south1" }, async (request) => {
   ensureReadPatch();
   const action = String(request.data?.action || "list");
   const caller = await callerProfile(request);
+  await assertNotMaintenance(caller);
   ensureActive(caller.profile);
   const payload = request.data?.payload || {};
   const isManager = MANAGER_ROLES.includes(caller.profile.role);
@@ -2618,6 +2645,7 @@ exports.notificationHub = onCall({ region: "asia-south1" }, async (request) => {
   ensureReadPatch();
   const action = String(request.data?.action || "list");
   const caller = await callerProfile(request);
+  await assertNotMaintenance(caller);
   ensureActive(caller.profile);
   const email = String(caller.email || "").trim().toLowerCase();
   if (action === "list") {
