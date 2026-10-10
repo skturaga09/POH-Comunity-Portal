@@ -79,7 +79,7 @@ const queue = async (fn) => { fn(batch); if (++ops >= 400) { await batch.commit(
 for (const c of changes) {
   if (c.newId === c.doc.id) await queue((b) => b.set(c.doc.ref, c.data));
   else {
-    await queue((b) => b.set(c.doc.ref.parent.doc(c.newId), { ...c.data, id: c.data.id === c.doc.id ? c.newId : c.data.id }));
+    await queue((b) => b.set(c.doc.ref.parent.doc(c.newId), c.data.id === c.doc.id ? { ...c.data, id: c.newId } : c.data));
     await queue((b) => b.delete(c.doc.ref));
   }
 }
