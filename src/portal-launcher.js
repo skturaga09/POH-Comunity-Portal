@@ -431,7 +431,9 @@ function prepareContributionForm() {
   if (saveBtn) saveBtn.innerHTML = '<i class="fa-solid fa-circle-check" aria-hidden="true"></i> Save contribution';
   setupContributionAmount();
   syncPaymentReferenceFields();
-  const floors = residentFloors();
+  resetScreenshotReference(form);
+  const access = checkIsSpocOrAdmin(activeEvent());
+  const floors = residentFloors().filter((floor) => access.isAdmin || !access.userSpocFloors.length || access.userSpocFloors.includes(floor));
   byId("contributionFloor").disabled = false;
   byId("contributionFloor").innerHTML = `<option value="">Select floor</option>${floors.map((floor) => `<option value="${escapeHtml(floor)}">${escapeHtml(floor === "G" ? "Ground floor" : `Floor ${floor}`)}</option>`).join("")}`;
   byId("contributionFlat").innerHTML = "<option value=\"\">Select floor first</option>";
@@ -457,6 +459,8 @@ function openContributionEditor(contribution) {
   byId("contributionFlat").value = String(contribution.flat || contribution.flatNo || "");
   byId("contributionFloor").disabled = true;
   byId("contributionFlat").disabled = true;
+  byId("contributionContributorType").value = contribution.contributorType === "Tenant" ? "Tenant" : "Owner";
+  populateContributionOwner(true);
   byId("contributionOwner").value = contribution.name || contribution.ownerName || getFlatResidentName(String(contribution.flat || ""), contribution.name);
   form.elements.amount.value = Number(contribution.amount || 0) || "";
   form.elements.paymentMode.value = ["UPI", "Cash", "Bank Transfer"].includes(contribution.paymentMode) ? contribution.paymentMode : "UPI";
@@ -494,12 +498,11 @@ function populateContributionSpoc() {
   // 2. Check event spocs list for event-specific assignments
   let spocsList = event?.spocs;
 
-  const assignment = (spocsList || []).find((entry) => {
+  const assignments = (spocsList || []).filter((entry) => {
     const ef = String(entry.floor || "").replace(/\D+/g, "") || String(entry.floor || "").toUpperCase();
     return ef && cleanFloor ? ef === cleanFloor : String(entry.floor || "").trim() === String(rawFloor || "").trim();
   });
-
-  const resident = assignment ? portalData.residents.find((entry) => String(entry.flat || entry.flatNo || "") === String(assignment.flat || "")) : null;
+  const assignment = assignments[0];
 
   if (officialName) {
     const matchedResident = portalData.residents.find(r => 
@@ -509,7 +512,10 @@ function populateContributionSpoc() {
     const flatInfo = matchedResident ? ` (Flat ${matchedResident.flat})` : (assignment ? ` · Flat ${assignment.flat}` : "");
     byId("contributionSpoc").value = `${officialName}${flatInfo}`;
   } else if (assignment) {
-    byId("contributionSpoc").value = `${resident ? residentName(resident) : "Resident"} · Flat ${assignment.flat}`;
+    byId("contributionSpoc").value = assignments.map((entry) => {
+      const resident = portalData.residents.find((r) => String(r.flat || r.flatNo || "") === String(entry.flat || ""));
+      return `${resident ? residentName(resident) : "Resident"} · Flat ${entry.flat}`;
+    }).join("  |  ");
   } else {
     byId("contributionSpoc").value = "Not assigned for this event";
   }
@@ -529,10 +535,17 @@ function populateContributionFlats() {
   checkContributionDuplicate();
 }
 
-function populateContributionOwner() {
+// Owner-occupied or empty flats: the owner paid. Rented flats: choose owner or tenant;
+// the name follows the choice.
+function populateContributionOwner(keepType) {
   const flat = byId("contributionFlat")?.value?.trim() || "";
   const resident = portalData.residents.find((entry) => String(entry.flat || entry.flatNo || "").trim().toUpperCase() === flat.toUpperCase());
-  if (byId("contributionOwner")) byId("contributionOwner").value = resident ? residentName(resident) : "";
+  const typeSelect = byId("contributionContributorType");
+  const rented = Boolean(resident) && occupancyKey(resident) === "tenant_occupied";
+  if (!rented || !keepType) typeSelect.value = "Owner";
+  typeSelect.disabled = !rented;
+  const tenantPaid = rented && typeSelect.value === "Tenant";
+  if (byId("contributionOwner")) byId("contributionOwner").value = !resident ? "" : tenantPaid ? textOr(resident.tenantName, "Tenant") : textOr(resident.ownerName, residentName(resident));
   checkContributionDuplicate();
 }
 
@@ -965,9 +978,12 @@ function switchAdminWorkspace(targetWorkspaceId) {
   const canManageUsers = ["super_admin", "admin"].includes(approvedProfile?.role);
   const canManageFinance = financeRoles.has(approvedProfile?.role);
 
+  // Committee members get event management and finance only; the rest is admin-only.
+  const allowed = adminRoles.has(approvedProfile?.role) ? workspaces : ["adminEventsWorkspace", "adminSettlementWorkspace"];
   if (targetWorkspaceId) {
     currentAdminWorkspace = targetWorkspaceId;
   }
+  if (!allowed.includes(currentAdminWorkspace)) currentAdminWorkspace = "adminEventsWorkspace";
   if (currentAdminWorkspace === "adminAccessWorkspace" && !canManageUsers) currentAdminWorkspace = "adminEventsWorkspace";
   if (currentAdminWorkspace === "adminSettlementWorkspace" && !canManageFinance) currentAdminWorkspace = "adminEventsWorkspace";
 
@@ -985,6 +1001,7 @@ function switchAdminWorkspace(targetWorkspaceId) {
   document.querySelectorAll("[data-admin-header-tab]").forEach((button) => {
     const isActive = button.dataset.adminHeaderTab === currentAdminWorkspace;
     button.classList.toggle("active", isActive);
+    button.hidden = !allowed.includes(button.dataset.adminHeaderTab);
     if (button.dataset.adminHeaderTab === "adminAccessWorkspace") button.hidden = !canManageUsers;
     if (button.dataset.adminHeaderTab === "adminSettlementWorkspace") button.hidden = !canManageFinance;
   });
@@ -1003,9 +1020,9 @@ function renderAdmin() {
   byId("adminEventList").innerHTML = portalData.events.length ? portalData.events.map((event) => {
     const closed = isClosed(event);
     const active = event.active || /^active$/i.test(eventStatus(event));
-    const canActivate = adminRoles.has(approvedProfile?.role) && !closed && !active;
-    const canComplete = adminRoles.has(approvedProfile?.role) && !closed;
-    const canEdit = adminRoles.has(approvedProfile?.role);
+    const canActivate = directoryEditorRoles.has(approvedProfile?.role) && !closed && !active;
+    const canComplete = directoryEditorRoles.has(approvedProfile?.role) && !closed;
+    const canEdit = directoryEditorRoles.has(approvedProfile?.role);
     const amountStr = ` · Suggested ₹${event.contributionAmount || 500}/flat`;
     let statusBadge = "";
     if (active) {
@@ -1021,10 +1038,12 @@ function renderAdmin() {
   }).join("") : "<li>No events available</li>";
   byId("adminRoleBadge").textContent = roleLabel(approvedProfile?.role || "administrator");
   switchAdminWorkspace(currentAdminWorkspace);
+  renderDirectoryActionItems();
   const floors = [...new Set(portalData.residents.map((resident) => String(resident.floor || "Unassigned")))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   byId("adminSpocFields").innerHTML = floors.map((floor) => {
-    const residents = portalData.residents.filter((resident) => String(resident.floor || "Unassigned") === floor);
-    return `<label>Floor ${escapeHtml(floor)} SPOC<select data-spoc-floor="${escapeHtml(floor)}"><option value="">Choose a resident</option>${residents.map((resident) => `<option value="${escapeHtml(textOr(resident.flat || resident.flatNo, ""))}">${escapeHtml(textOr(resident.flat || resident.flatNo, "Flat"))} · ${escapeHtml(textOr(resident.ownerName || resident.name, "Owner pending"))}</option>`).join("")}</select><input data-spoc-upi="${escapeHtml(floor)}" placeholder="SPOC UPI ID for pay-QR (e.g. name@okaxis)" style="margin-top:6px;"></label>`;
+    const f = escapeHtml(floor);
+    const slot = (n) => `<label>Floor ${f} · SPOC ${n}${n === 2 ? " (optional)" : ""}<select data-spoc-floor="${f}" data-spoc-slot="${n}">${spocOptions(floor, false)}</select><input data-spoc-upi="${f}" data-spoc-slot="${n}" placeholder="UPI ID for pay-QR (e.g. name@okaxis)" style="margin-top:6px;"></label>`;
+    return `${slot(1)}${slot(2)}<label class="full" style="flex-direction:row;align-items:center;gap:8px;font-weight:600;"><input type="checkbox" data-spoc-any="${f}" style="width:auto;"> No suitable SPOC on Floor ${f}? Pick from any floor</label>`;
   }).join("") || empty("No resident floors are available.");
   byId("adminCommitteeList").innerHTML = portalData.committee.length ? portalData.committee.map((member) => `<article class="admin-person"><span class="role-badge">${escapeHtml(textOr(member.role, "Committee member"))}</span><strong>${escapeHtml(textOr(member.name, "Name pending"))}</strong><small>${escapeHtml(textOr(member.flat, "Flat not recorded"))}</small><div class="record-actions"><button data-edit-committee="${escapeHtml(member.id)}" type="button" aria-label="Edit ${escapeHtml(textOr(member.name, "committee member"))}" title="Edit committee member"><i class="fa-solid fa-pen" aria-hidden="true"></i></button><button class="danger-icon" data-delete-committee="${escapeHtml(member.id)}" data-committee-name="${escapeHtml(member.name)}" type="button" aria-label="Remove ${escapeHtml(textOr(member.name, "committee member"))}" title="Remove committee member"><i class="fa-solid fa-trash-can" aria-hidden="true"></i></button></div></article>`).join("") : empty("No committee members have been added.");
   const accessSearchQuery = String(byId("adminAccessSearch")?.value || "").trim().toLowerCase();
@@ -1150,8 +1169,8 @@ function getUserResidentRecord() {
 }
 
 function checkIsSpocOrAdmin(event) {
-  if (!approvedProfile) return { canView: false, userSpocFloor: null, isAdmin: false, isSpoc: false };
-  const isAdmin = adminRoles.has(approvedProfile.role);
+  if (!approvedProfile) return { canView: false, userSpocFloor: null, userSpocFloors: [], isAdmin: false, isSpoc: false };
+  const isAdmin = directoryEditorRoles.has(approvedProfile.role);
 
   const userResident = getUserResidentRecord();
   // Mirror the backend: a SPOC is matched by profile.flat OR the flat whose resident
@@ -1162,15 +1181,15 @@ function checkIsSpocOrAdmin(event) {
   const candidateFlats = [profileFlat, residentFlat].filter(Boolean);
   const userFloor = userResident ? String(userResident.floor || "").trim() : "";
 
+  // Same flat may be SPOC for its own floor and, by override, for other floors.
   const spocs = Array.isArray(event?.spocs) ? event.spocs : [];
-  const spocMatch = spocs.find((s) => {
+  const userSpocFloors = [...new Set(spocs.filter((s) => {
     const f = String(s.flat || "").trim().toUpperCase();
     return f && candidateFlats.includes(f);
-  });
-  const isSpoc = Boolean(spocMatch);
-  const spocFloor = spocMatch ? String(spocMatch.floor || userFloor) : null;
+  }).map((s) => String(s.floor || userFloor)))];
+  const isSpoc = userSpocFloors.length > 0;
 
-  return { canView: isAdmin || isSpoc, userSpocFloor: spocFloor || userFloor || null, isAdmin, isSpoc };
+  return { canView: isAdmin || isSpoc, userSpocFloor: userSpocFloors[0] || userFloor || null, userSpocFloors, isAdmin, isSpoc };
 }
 
 let selectedSpocMatrixFloor = "";
@@ -1196,7 +1215,7 @@ function renderSpocFloorMatrix(event) {
   if (tabsContainer) {
     tabsContainer.innerHTML = floors.map((f) => {
       const isSelected = f === selectedSpocMatrixFloor;
-      const isSpocFloor = access.isSpoc && access.userSpocFloor === f;
+      const isSpocFloor = access.userSpocFloors.includes(f);
       const spocBadge = isSpocFloor ? ` ⭐ SPOC` : "";
       return `<button type="button" data-spoc-matrix-floor="${escapeHtml(f)}" aria-pressed="${isSelected}">${escapeHtml(f)} Floor${spocBadge}</button>`;
     }).join("");
@@ -1410,7 +1429,7 @@ function renderEventDashboard() {
   const contribEditable = !isClosed(event);
   const canManageContribution = (floor) => contribEditable && (
     directoryEditorRoles.has(approvedProfile?.role) ||
-    (financeAccess.isSpoc && String(financeAccess.userSpocFloor || "") === String(floor || ""))
+    financeAccess.userSpocFloors.includes(String(floor || ""))
   );
   const anyContribManager = contribEditable && (directoryEditorRoles.has(approvedProfile?.role) || financeAccess.isSpoc);
   byId("contributionList").innerHTML = rawFinance.contributions.length ? rawFinance.contributions
@@ -1422,13 +1441,16 @@ function renderEventDashboard() {
       const canManage = canManageContribution(item.floor);
       const actions = canManage
         ? `<div style="display:flex;gap:6px;justify-content:flex-end;">
-             <button type="button" class="contrib-edit-btn" data-edit-contribution='${escapeHtml(JSON.stringify({ id: item.id, flat: item.flat, floor: item.floor, name: displayName, amount: item.amount, paymentMode: item.paymentMode, reference: item.reference || "", date: item.date || "" }))}' style="background:#e6efe9;color:#183e35;border:1px solid #c2d6c7;font-size:11px;font-weight:700;padding:4px 9px;border-radius:5px;cursor:pointer;white-space:nowrap;"><i class="fa-solid fa-pen-to-square"></i> Edit</button>
+             <button type="button" class="contrib-edit-btn" data-edit-contribution='${escapeHtml(JSON.stringify({ id: item.id, flat: item.flat, floor: item.floor, name: displayName, contributorType: item.contributorType || "", amount: item.amount, paymentMode: item.paymentMode, reference: item.reference || "", date: item.date || "" }))}' style="background:#e6efe9;color:#183e35;border:1px solid #c2d6c7;font-size:11px;font-weight:700;padding:4px 9px;border-radius:5px;cursor:pointer;white-space:nowrap;"><i class="fa-solid fa-pen-to-square"></i> Edit</button>
              <button type="button" class="contrib-delete-btn" data-delete-contribution="${escapeHtml(item.id || "")}" data-flat="${escapeHtml(flatStr)}" data-amount="${Number(item.amount || 0)}" style="background:#fdf0ed;color:#9c3f34;border:1px solid #f2c7c1;font-size:11px;font-weight:700;padding:4px 9px;border-radius:5px;cursor:pointer;white-space:nowrap;"><i class="fa-solid fa-trash"></i></button>
            </div>`
         : "";
-      return `<tr><td>${escapeHtml(textOr(item.flat, "—"))}</td><td>${escapeHtml(displayName)}</td><td><strong>${money(item.amount)}</strong></td><td>${escapeHtml(textOr(item.paymentMode, "—"))}</td><td>${escapeHtml(displayDate(item.date))}</td><td style="text-align:right;">${actions}</td></tr>`;
+      const receipts = (Array.isArray(item.receiptUrls) ? item.receiptUrls : []).map((u) => safeUrl(u)).filter(Boolean);
+      const receiptBtn = receipts.length ? ` <button class="receipt-link" data-receipt-urls='${escapeHtml(JSON.stringify(receipts))}' type="button" title="View payment screenshot"><i class="fa-solid fa-image" aria-hidden="true"></i></button>` : "";
+      // Older contributions predate owner/tenant tracking.
+      return `<tr><td>${escapeHtml(textOr(item.flat, "—"))}</td><td>${escapeHtml(displayName)}</td><td>${escapeHtml(textOr(item.contributorType, "—"))}</td><td><strong>${money(item.amount)}</strong></td><td>${escapeHtml(textOr(item.paymentMode, "—"))}${receiptBtn}</td><td>${escapeHtml(displayDate(item.date))}</td><td style="text-align:right;">${actions}</td></tr>`;
     })
-    .join("") : "<tr><td class=\"empty-inline\" colspan=\"5\">No contributions recorded for this event yet.</td></tr>";
+    .join("") : "<tr><td class=\"empty-inline\" colspan=\"7\">No contributions recorded for this event yet.</td></tr>";
   renderExpenseHistory();
   byId("contributionEventName").textContent = eventTitle(event);
   byId("expenseEventName").textContent = eventTitle(event);
@@ -1650,7 +1672,7 @@ async function reloadPortalData() {
 }
 
 async function loadAdminSecureData() {
-  if (!adminRoles.has(approvedProfile?.role)) return;
+  if (!directoryEditorRoles.has(approvedProfile?.role)) return;
   const calls = [];
   if (["super_admin", "admin"].includes(approvedProfile.role)) calls.push(portalAccessCall({ action: "list" }).then((result) => { adminSecure.users = result.data.users || []; adminSecure.invites = result.data.invites || []; }));
   if (financeRoles.has(approvedProfile.role)) calls.push(adminConsoleCall({ action: "settlementSummary" }).then((result) => { adminSecure.settlements = result.data.settlements || []; adminSecure.commonPool = result.data.commonPool || 0; }));
@@ -1684,7 +1706,7 @@ async function enterPortal(user) {
   if (byId("accountName")) byId("accountName").textContent = name;
   if (byId("accountFlat")) byId("accountFlat").textContent = [approvedProfile.flat ? `Flat ${approvedProfile.flat}` : "", roleLabel(approvedProfile.role)].filter(Boolean).join(" · ");
   if (byId("accountAvatarLetter")) byId("accountAvatarLetter").textContent = (name || "?").trim().charAt(0).toUpperCase();
-  const hasAdminAccess = adminRoles.has(approvedProfile.role);
+  const hasAdminAccess = directoryEditorRoles.has(approvedProfile.role);
   if (byId("adminNavWrap")) byId("adminNavWrap").hidden = !hasAdminAccess;
   if (byId("adminNav")) byId("adminNav").hidden = !hasAdminAccess;
   if (byId("moreSheetAdmin")) byId("moreSheetAdmin").hidden = !hasAdminAccess;
@@ -1714,7 +1736,10 @@ async function saveContribution(event) {
   const flat = String(formData.get("flat") || "").trim();
   const amount = Number(formData.get("amount"));
   const editingId = form.dataset.editingContributionId || "";
-  if (!String(formData.get("name") || "").trim()) { showToast("Owner / resident name is required.", "warning"); return; }
+  if (!String(formData.get("name") || "").trim()) { showToast("Contributor name is required.", "warning"); return; }
+  const contributorType = byId("contributionContributorType").value;
+  await form.receiptUpload;
+  const receiptUrls = form.dataset.receiptUrls ? JSON.parse(form.dataset.receiptUrls) : undefined;
   if (!editingId && (!flat || !String(formData.get("floor") || "").trim())) { showToast("Select a floor and flat before saving.", "warning"); return; }
   if (!Number.isFinite(amount) || amount <= 0) { showToast("Enter a valid contribution amount.", "warning"); return; }
   if (formData.get("paymentMode") !== "Cash" && !String(formData.get("reference") || "").trim()) { showToast("Enter the UPI or bank transaction reference before saving this contribution.", "warning"); return; }
@@ -1723,12 +1748,12 @@ async function saveContribution(event) {
   button.disabled = true; button.textContent = "Saving…";
   try {
     if (editingId) {
-      await adminConsoleCall({ action: "editContribution", payload: { eventId: event.id, contributionId: editingId, name: formData.get("name"), amount, paymentMode: formData.get("paymentMode"), reference: formData.get("reference"), date: formData.get("date") } });
+      await adminConsoleCall({ action: "editContribution", payload: { eventId: event.id, contributionId: editingId, name: formData.get("name"), contributorType, amount, paymentMode: formData.get("paymentMode"), reference: formData.get("reference"), date: formData.get("date"), receiptUrls } });
     } else {
-      await adminConsoleCall({ action: "recordContribution", payload: { eventId: event.id, name: formData.get("name"), floor: formData.get("floor"), flat, amount, paymentMode: formData.get("paymentMode"), reference: formData.get("reference"), date: formData.get("date") } });
+      await adminConsoleCall({ action: "recordContribution", payload: { eventId: event.id, name: formData.get("name"), contributorType, floor: formData.get("floor"), flat, amount, paymentMode: formData.get("paymentMode"), reference: formData.get("reference"), date: formData.get("date"), receiptUrls } });
     }
     delete form.dataset.editingContributionId;
-    form.reset(); syncPaymentReferenceFields(); await refreshEventFinance(event.id); byId("contributionFormModal").close();
+    form.reset(); syncPaymentReferenceFields(); resetScreenshotReference(form); await refreshEventFinance(event.id); byId("contributionFormModal").close();
     showToast(editingId ? "Contribution updated." : "Contribution recorded successfully.", "success");
   } catch (error) { console.error("Unable to save contribution", error); showToast(error.message || "Contribution could not be saved. Please try again.", "error"); }
   finally { button.disabled = false; button.innerHTML = '<i class="fa-solid fa-circle-check" aria-hidden="true"></i> Save contribution'; endPortalWork(); }
@@ -1775,6 +1800,48 @@ async function uploadReceiptFiles(files, eventId) {
   return urls;
 }
 
+// Upload the chosen payment screenshot(s) right away and read the UPI reference from the
+// first image, so the saved reference comes from the actual payment, not from typing.
+function resetScreenshotReference(form) {
+  delete form.dataset.receiptUrls;
+  form.receiptUpload = null;
+  const status = form.querySelector("[data-ref-status]");
+  if (status) status.textContent = "";
+}
+function readReferenceFromScreenshot(form, eventId) {
+  form.receiptUpload = uploadAndReadScreenshot(form, eventId);
+  return form.receiptUpload;
+}
+async function uploadAndReadScreenshot(form, eventId) {
+  const files = [...(form.elements.receiptFile?.files || [])].filter((file) => file.size);
+  delete form.dataset.receiptUrls;
+  const status = form.querySelector("[data-ref-status]");
+  if (status) status.textContent = "";
+  if (!files.length) return;
+  beginPortalWork("Reading the payment screenshot…");
+  try {
+    const urls = [];
+    let imageUrl = "";
+    for (const file of files) {
+      const url = await uploadReceiptFile(file, eventId);
+      urls.push(url);
+      if (!imageUrl && file.type.startsWith("image/")) imageUrl = url;
+    }
+    form.dataset.receiptUrls = JSON.stringify(urls);
+    if (!imageUrl || form.elements.paymentMode?.value === "Cash") return;
+    const { data } = await adminConsoleCall({ action: "readPaymentReference", payload: { url: imageUrl, eventId } });
+    if (data?.reference) {
+      form.elements.reference.value = data.reference;
+      if (status) status.textContent = "✓ Reference read from the screenshot — please check it matches.";
+    } else if (status) status.textContent = "Couldn't read a reference from the screenshot — please type it.";
+  } catch (error) {
+    console.error("Unable to read payment screenshot", error);
+    if (status) status.textContent = "Couldn't read the screenshot — please type the reference.";
+  } finally { endPortalWork(); }
+}
+byId("contributionForm").elements.receiptFile.addEventListener("change", () => readReferenceFromScreenshot(byId("contributionForm"), activeEvent()?.id));
+byId("expenseForm").elements.receiptFile.addEventListener("change", () => readReferenceFromScreenshot(byId("expenseForm"), activeEvent()?.id));
+byId("contributionContributorType").addEventListener("change", () => populateContributionOwner(true));
 async function saveExpense(event) {
   if (isClosed(event)) { showToast("This event has been settled and is closed for new expenses.", "warning"); return; }
   const form = byId("expenseForm");
@@ -1786,10 +1853,12 @@ async function saveExpense(event) {
   button.disabled = true; button.textContent = "Saving…";
   try {
     const manualUrl = String(formData.get("receiptUrl") || "").trim();
-    const uploaded = await uploadReceiptFiles(form.elements.receiptFile?.files, event.id);
+    // Screenshots are already uploaded when they were picked (see readReferenceFromScreenshot).
+    await form.receiptUpload;
+    const uploaded = form.dataset.receiptUrls ? JSON.parse(form.dataset.receiptUrls) : await uploadReceiptFiles(form.elements.receiptFile?.files, event.id);
     const receiptUrls = [...uploaded, ...(manualUrl ? [manualUrl] : [])];
     await adminConsoleCall({ action: "recordExpense", payload: { eventId: event.id, category: formData.get("category"), description: formData.get("description"), amount, paidBy: formData.get("paidBy"), paymentMode: formData.get("paymentMode"), reference: formData.get("reference"), remarks: formData.get("remarks"), receiptUrls } });
-    form.reset(); syncPaymentReferenceFields(); await refreshEventFinance(event.id); byId("expenseFormModal").close(); showToast("Expense recorded successfully.", "success");
+    form.reset(); syncPaymentReferenceFields(); resetScreenshotReference(form); await refreshEventFinance(event.id); byId("expenseFormModal").close(); showToast("Expense recorded successfully.", "success");
   } catch (error) { console.error("Unable to save expense", error); showToast(error.message || "Expense could not be saved. Please try again.", "error"); }
   finally { button.disabled = false; button.innerHTML = '<i class="fa-solid fa-floppy-disk" aria-hidden="true"></i> Save expense'; endPortalWork(); }
 }
@@ -2158,7 +2227,9 @@ byId("homeNoticeList").addEventListener("click", (event) => {
 byId("dashboardBack").addEventListener("click", () => activateRoute("events"));
 byId("addContributionAction").addEventListener("click", () => { prepareContributionForm(); byId("contributionFormModal").showModal(); });
 byId("addExpenseAction").addEventListener("click", () => {
-  if (!byId("addExpenseAction").disabled) byId("expenseFormModal").showModal();
+  if (byId("addExpenseAction").disabled) return;
+  byId("expenseForm").reset(); syncPaymentReferenceFields(); resetScreenshotReference(byId("expenseForm"));
+  byId("expenseFormModal").showModal();
 });
 window.openEventSummaryReport = function openEventSummaryReport() {
   const event = activeEvent();
@@ -2418,6 +2489,8 @@ byId("downloadFullReportBtn").addEventListener("click", async () => {
 
 byId("viewContributionAction").addEventListener("click", () => byId("contributionHistoryModal").showModal());
 byId("contributionList")?.addEventListener("click", (e) => {
+  const receipts = e.target.closest("[data-receipt-urls]")?.dataset.receiptUrls;
+  if (receipts) { try { showReceipts(JSON.parse(receipts)); } catch (err) { console.error("Bad receipt list", err); } return; }
   const editBtn = e.target.closest("[data-edit-contribution]");
   if (editBtn) { try { byId("contributionHistoryModal")?.close(); openContributionEditor(JSON.parse(editBtn.dataset.editContribution)); } catch (err) { console.error("edit contribution", err); } return; }
   const delBtn = e.target.closest("[data-delete-contribution]");
@@ -2518,7 +2591,7 @@ byId("expenseReviewForm")?.addEventListener("submit", async (e) => {
   }
 });
 byId("contributionFloor").addEventListener("change", populateContributionFlats);
-byId("contributionFlat").addEventListener("change", populateContributionOwner);
+byId("contributionFlat").addEventListener("change", () => populateContributionOwner(false));
 byId("contributionForm").elements.paymentMode.addEventListener("change", syncPaymentReferenceFields);
 byId("expenseForm").elements.paymentMode.addEventListener("change", syncPaymentReferenceFields);
 byId("allocatePoolAction").addEventListener("click", () => byId("commonPoolModal").showModal());
@@ -2608,7 +2681,56 @@ byId("receiptModal")?.addEventListener("keydown", (e) => {
   else if (e.key === "ArrowRight") { e.preventDefault(); renderReceiptAt(receiptGallery.index + 1); }
 });
 byId("adminEventStatus").addEventListener("change", () => { byId("adminSpocHelper").textContent = byId("adminEventStatus").value === "Active" ? "Every floor requires an assigned SPOC before this event can be activated." : "Optional while planning or upcoming. Add SPOCs before the event is activated."; });
+// SPOC choices: that floor's residents, or every resident when the floor is overridden.
+// Any flat that isn't Vacant (occupied, rented, interiors in progress…) must have the
+// owner's name and phone on record; list the gaps for admins and committee to fix.
+function renderDirectoryActionItems() {
+  const panel = byId("adminActionItems");
+  if (!panel) return;
+  const gaps = portalData.residents.map((r) => {
+    if (/vacant/i.test(String(r.occupancy || r.occupancyStatus || ""))) return null;
+    const missing = [];
+    if (!String(r.ownerName || r.name || "").trim()) missing.push("owner name");
+    if (!String(r.ownerMobile || r.ownerPrimaryPhone || r.ownerSecondaryPhone || "").trim()) missing.push("owner phone");
+    return missing.length ? { r, missing } : null;
+  }).filter(Boolean).sort((a, b) => flatNumberOrder(a.r.flat, b.r.flat, a.r.floor, b.r.floor));
+  panel.hidden = !directoryEditorRoles.has(approvedProfile?.role) || !gaps.length;
+  if (panel.hidden) return;
+  panel.innerHTML = `<details><summary style="cursor:pointer;font-weight:800;color:#8b4a16;"><i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i> Action needed: ${gaps.length} occupied flat${gaps.length > 1 ? "s are" : " is"} missing owner details</summary><ul style="list-style:none;padding:0;margin:10px 0 0;">${gaps.map(({ r, missing }) => `<li style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-top:1px solid #f0e3d3;"><span><strong>Flat ${escapeHtml(textOr(r.flat || r.flatNo, "—"))}</strong> · ${escapeHtml(textOr(r.occupancy || r.occupancyStatus, "Unverified"))} · missing ${escapeHtml(missing.join(" & "))}</span><button type="button" class="solid-button" data-fix-resident="${escapeHtml(r.id)}" style="font-size:12px;padding:5px 10px;">Update</button></li>`).join("")}</ul></details>`;
+}
+byId("adminActionItems")?.addEventListener("click", (event) => {
+  const id = event.target.closest("[data-fix-resident]")?.dataset.fixResident;
+  const resident = id && portalData.residents.find((r) => r.id === id);
+  if (resident) openResidentEditor(resident);
+});
+function spocOptions(floor, anyFloor) {
+  const residents = portalData.residents.filter((r) => anyFloor || String(r.floor || "Unassigned") === floor);
+  return `<option value="">Choose a resident</option>${residents.map((r) => {
+    const flat = textOr(r.flat || r.flatNo, "");
+    const where = anyFloor && String(r.floor || "") !== floor ? ` (Floor ${r.floor || "?"})` : "";
+    return `<option value="${escapeHtml(flat)}">${escapeHtml(textOr(flat, "Flat"))} · ${escapeHtml(textOr(r.ownerName || r.name, "Owner pending"))}${escapeHtml(where)}</option>`;
+  }).join("")}`;
+}
+function setSpocOverride(floor, anyFloor) {
+  const box = byId("adminSpocFields");
+  const toggle = box.querySelector(`[data-spoc-any="${CSS.escape(floor)}"]`);
+  if (toggle) toggle.checked = anyFloor;
+  box.querySelectorAll(`select[data-spoc-floor="${CSS.escape(floor)}"]`).forEach((select) => {
+    const value = select.value;
+    select.innerHTML = spocOptions(floor, anyFloor);
+    select.value = value;
+  });
+}
+byId("adminSpocFields").addEventListener("change", (event) => {
+  const toggle = event.target.closest("[data-spoc-any]");
+  if (toggle) setSpocOverride(toggle.dataset.spocAny, toggle.checked);
+});
+function clearSpocFields() {
+  residentFloors().forEach((floor) => setSpocOverride(floor, false));
+  byId("adminSpocFields").querySelectorAll("select[data-spoc-floor], [data-spoc-upi]").forEach((field) => { field.value = ""; });
+}
 function populateEventEditor(event) {
+  clearSpocFields();
   const form = byId("adminEventForm");
   if (!form || !event) return;
   if (form.elements.id) form.elements.id.value = event.id;
@@ -2619,10 +2741,16 @@ function populateEventEditor(event) {
   if (form.elements.description) form.elements.description.value = event.description || "";
 
   const spocs = Array.isArray(event.spocs) ? event.spocs : [];
+  const slotByFloor = {};
   spocs.forEach((entry) => {
-    const select = byId("adminSpocFields")?.querySelector(`[data-spoc-floor="${entry.floor}"]`);
+    const floor = String(entry.floor);
+    const slot = slotByFloor[floor] = (slotByFloor[floor] || 0) + 1;
+    if (slot > 2) return;
+    const fromOtherFloor = !portalData.residents.some((r) => String(r.floor || "Unassigned") === floor && String(r.flat || r.flatNo || "") === String(entry.flat));
+    if (fromOtherFloor) setSpocOverride(floor, true);
+    const select = byId("adminSpocFields")?.querySelector(`select[data-spoc-floor="${CSS.escape(floor)}"][data-spoc-slot="${slot}"]`);
     if (select) select.value = entry.flat;
-    const upiInput = byId("adminSpocFields")?.querySelector(`[data-spoc-upi="${entry.floor}"]`);
+    const upiInput = byId("adminSpocFields")?.querySelector(`[data-spoc-upi="${CSS.escape(floor)}"][data-spoc-slot="${slot}"]`);
     if (upiInput) upiInput.value = entry.upiId || "";
   });
 
@@ -2642,6 +2770,7 @@ function clearAdminEventForm() {
   const form = byId("adminEventForm");
   if (!form) return;
   form.reset();
+  clearSpocFields();
   if (form.elements.id) form.elements.id.value = "";
   if (form.elements.contributionAmount) form.elements.contributionAmount.value = "500";
   const titleHeading = byId("adminEventTitleHeading");
@@ -2660,13 +2789,15 @@ byId("adminEventForm").addEventListener("submit", async (event) => {
   const formData = new FormData(form);
   const eventId = String(formData.get("id") || "").trim();
   const contributionAmount = Math.max(1, Number(formData.get("contributionAmount") || 500));
-  const spocs = [...byId("adminSpocFields").querySelectorAll("[data-spoc-floor]")].map((select) => {
-    const floor = select.dataset.spocFloor;
-    const upiInput = byId("adminSpocFields").querySelector(`[data-spoc-upi="${floor}"]`);
+  const spocs = [...byId("adminSpocFields").querySelectorAll("select[data-spoc-floor]")].map((select) => {
+    const { spocFloor: floor, spocSlot: slot } = select.dataset;
+    const upiInput = byId("adminSpocFields").querySelector(`[data-spoc-upi="${CSS.escape(floor)}"][data-spoc-slot="${slot}"]`);
     return { floor, flat: select.value, upiId: String(upiInput?.value || "").trim() };
   }).filter((entry) => entry.flat);
+  const twice = spocs.find((a, i) => spocs.some((b, j) => j < i && b.floor === a.floor && b.flat === a.flat));
+  if (twice) { showToast(`Flat ${twice.flat} is chosen twice as SPOC for Floor ${twice.floor}.`, "warning"); return; }
   const expectedFloors = residentFloors();
-  if (formData.get("status") === "Active" && spocs.length !== expectedFloors.length) { showToast("Assign one SPOC for every floor before activating this event.", "warning"); return; }
+  if (formData.get("status") === "Active" && expectedFloors.some((floor) => !spocs.some((s) => s.floor === floor))) { showToast("Assign at least one SPOC for every floor before activating this event.", "warning"); return; }
 
   const action = eventId ? "updateEvent" : "createEvent";
   const successMsg = eventId ? `Updated event ${formData.get("name")}.` : "Event created with custom contribution amount.";
@@ -3694,15 +3825,16 @@ async function publishHelpdeskReport() {
 
 let currentReminderCardDetails = null;
 
-function floorSpoc(eventObj, floorStr) {
-  if (!eventObj || !floorStr) return null;
+function floorSpocs(eventObj, floorStr) {
+  if (!eventObj || !floorStr) return [];
   const spocs = Array.isArray(eventObj.spocs) ? eventObj.spocs : [];
-  return spocs.find((s) => String(s.floor ?? "").trim() === String(floorStr).trim()) || null;
+  return spocs.filter((s) => String(s.floor ?? "").trim() === String(floorStr).trim());
 }
+// "A & B" for a floor with two SPOCs.
 function getFloorSpocName(eventObj, floorStr) {
-  const spocEntry = floorSpoc(eventObj, floorStr);
-  if (!spocEntry) return "";
-
+  return floorSpocs(eventObj, floorStr).map(spocEntryName).filter(Boolean).join(" & ");
+}
+function spocEntryName(spocEntry) {
   // If spocEntry has an explicit name field, use it directly
   if (spocEntry.name && String(spocEntry.name).trim()) return String(spocEntry.name).trim();
 
@@ -3725,9 +3857,13 @@ function getFloorSpocName(eventObj, floorStr) {
 
 // The floor SPOC's UPI ID for the pay-QR, taken from the event's own SPOC assignment
 // (entered at event setup) — not from resident profiles.
+// The pay-QR uses the first of the floor's SPOCs that has a UPI ID.
+function floorSpocWithUpi(eventObj, floorStr) {
+  return floorSpocs(eventObj, floorStr).find((s) => String(s.upiId || "").trim()) || null;
+}
 function getFloorSpocUpi(eventObj, floorStr) {
-  const entry = floorSpoc(eventObj, floorStr);
-  return entry ? String(entry.upiId || "").trim() : "";
+  const entry = floorSpocWithUpi(eventObj, floorStr);
+  return entry ? String(entry.upiId).trim() : "";
 }
 
 // Draw a scannable UPI pay-QR (no amount, so the payer enters ₹500 or more) onto the
@@ -3884,7 +4020,7 @@ function generateReminderCardImage(details) {
       ctx.textAlign = "center";
       ctx.fillText("Scan & Pay — any UPI app", w / 2, 506);
       const qrSize = 132;
-      drawUpiQr(ctx, details.spocUpi, details.spocName, (w - qrSize) / 2, 518, qrSize);
+      drawUpiQr(ctx, details.spocUpi, details.spocUpiName || details.spocName, (w - qrSize) / 2, 518, qrSize);
       ctx.fillStyle = "#5f6b62";
       ctx.font = "12px sans-serif";
       ctx.fillText(`UPI: ${details.spocUpi}`, w / 2, 672);
@@ -3983,6 +4119,7 @@ document.addEventListener("click", async (event) => {
       floorStr,
       spocName,
       spocUpi: getFloorSpocUpi(eventObj, floorStr),
+      spocUpiName: floorSpocWithUpi(eventObj, floorStr) ? spocEntryName(floorSpocWithUpi(eventObj, floorStr)) : "",
       resName: cardModalBtn.dataset.resName,
       eventName: cardModalBtn.dataset.eventName,
       expectedAmount: Number(cardModalBtn.dataset.amount || 500),

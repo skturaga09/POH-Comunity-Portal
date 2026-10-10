@@ -3,6 +3,7 @@ const { logger } = require("firebase-functions");
 const admin = require("firebase-admin");
 const crypto = require("crypto");
 const { PDFDocument, StandardFonts, rgb } = require("pdf-lib");
+const { extractUpiReference } = require("./upi-ref");
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -606,6 +607,7 @@ function ensureRole(profile, roles) {
   if (!roles.includes(profile.role)) throw new HttpsError("permission-denied", "You do not have permission for this portal action.");
 }
 
+
 // Resolve the caller's flat, preferring their profile, then matching their
 // email against any owner/tenant/family email in the directory.
 // Every resident email field a SPOC's login could be recorded under. Kept identical to
@@ -641,42 +643,78 @@ async function resolveCallerFlat(caller) {
   return match ? String(match.data().flat || match.id).trim().toUpperCase() : "";
 }
 
-// The caller's SPOC assignment ({floor, flat}) for a SPECIFIC event, or null.
-// Email-based and event-scoped: the caller is that event's SPOC for a flat when the
-// flat is in THIS event's spocs[] AND either their profile.flat matches it or their
-// login email is on that flat's resident record. Because spocs[] is per event, the
-// assignment applies only to this event and ends when it closes (contributions are
-// then frozen for everyone) — access never carries to other/future events.
-async function callerSpocAssignment(caller, eventData) {
+// The floors the caller is SPOC for in a SPECIFIC event ([] if none). Up to two SPOCs per
+// floor, and a resident may cover another floor (override), so one flat can map to several
+// floors. Email-based and event-scoped: the caller's flat is matched by profile.flat, or by
+// their login email on that flat's resident record. Because spocs[] is per event, access
+// ends when the event closes and never carries to other/future events.
+async function callerSpocFloors(caller, eventData) {
   const spocs = Array.isArray(eventData?.spocs) ? eventData.spocs : [];
-  if (!spocs.length) return null;
-  const spocByFlat = (flat) => spocs.find((s) => String(s.flat || "").trim().toUpperCase() === flat) || null;
-  const profileFlat = String(caller.profile?.flat || "").trim().toUpperCase();
-  if (profileFlat) {
-    const viaProfile = spocByFlat(profileFlat);
-    if (viaProfile) return viaProfile;
-  }
+  if (!spocs.length) return [];
+  const norm = (value) => String(value || "").trim().toUpperCase();
+  const floorsFor = (flat) => spocs.filter((s) => norm(s.flat) === flat).map((s) => String(s.floor || "").trim());
+  const profileFlat = norm(caller.profile?.flat);
+  if (profileFlat && floorsFor(profileFlat).length) return floorsFor(profileFlat);
   const email = String(caller.email || "").trim().toLowerCase();
-  if (!email) return null;
-  const spocFlats = new Set(spocs.map((s) => String(s.flat || "").trim().toUpperCase()).filter(Boolean));
+  if (!email) return [];
+  const spocFlats = new Set(spocs.map((s) => norm(s.flat)).filter(Boolean));
   const snap = await db.collection("residents").get();
   for (const doc of snap.docs) {
     const r = doc.data();
-    const flat = String(r.flat || doc.id).trim().toUpperCase();
-    if (spocFlats.has(flat) && residentEmails(r).includes(email)) return spocByFlat(flat);
+    const flat = norm(r.flat || doc.id);
+    if (spocFlats.has(flat) && residentEmails(r).includes(email)) return floorsFor(flat);
   }
-  return null;
+  return [];
 }
 
 // Contribution management access: admins + committee (DIRECTORY_EDITOR_ROLES) have
-// full access to any floor; an event SPOC may manage only their own floor. Throws
-// HttpsError if the caller isn't permitted for `floor`.
+// full access to any floor; an event SPOC only for the floor(s) they are assigned.
+// Throws HttpsError if the caller isn't permitted for `floor`.
 async function assertCanManageContribution(caller, eventData, floor) {
   if (DIRECTORY_EDITOR_ROLES.includes(caller.profile.role)) return;
-  const spocMatch = await callerSpocAssignment(caller, eventData);
-  if (!spocMatch) throw new HttpsError("permission-denied", "Only the floor SPOC, an administrator, or a committee member can manage contributions for this event.");
-  const spocFloor = String(spocMatch.floor || "").trim();
-  if (spocFloor && floor && spocFloor !== floor) throw new HttpsError("permission-denied", `As the Floor ${spocFloor} SPOC you can manage contributions only for your own floor.`);
+  const floors = await callerSpocFloors(caller, eventData);
+  if (!floors.length) throw new HttpsError("permission-denied", "Only a floor SPOC, an administrator, or a committee member can manage contributions for this event.");
+  if (floor && !floors.includes(floor)) throw new HttpsError("permission-denied", `As SPOC for Floor ${floors.join(", ")} you can manage contributions only for ${floors.length > 1 ? "those floors" : "that floor"}.`);
+}
+
+// A UPI/bank reference identifies one payment, so it may back only one contribution per
+// event — this catches a reused screenshot or a copy-pasted reference.
+async function assertUniqueReference(eventId, paymentMode, reference, exceptId) {
+  if (paymentMode === "Cash" || !reference) return;
+  const snap = await db.collection("events").doc(eventId).collection("contributions").where("reference", "==", reference).limit(2).get();
+  const clash = snap.docs.find((doc) => doc.id !== exceptId);
+  if (clash) throw new HttpsError("already-exists", `Reference ${reference} is already recorded for flat ${clash.data().flat}. Each payment can be recorded only once.`);
+}
+
+// "Paid by tenant" only makes sense for a rented flat.
+async function assertTenantOccupied(flat) {
+  const snap = await db.collection("residents").doc(String(flat)).get();
+  if (!/tenant/i.test(String(snap.data()?.occupancy || snap.data()?.occupancyStatus || ""))) throw new HttpsError("invalid-argument", `Flat ${flat} isn't recorded as tenant-occupied, so the owner must be the contributor.`);
+}
+
+function cleanReceiptUrls(value) {
+  const urls = (Array.isArray(value) ? value : []).map((u) => String(u || "").trim()).filter(Boolean);
+  for (const u of urls) { if (!/^https:\/\//i.test(u)) throw new HttpsError("invalid-argument", "A receipt link is not valid."); }
+  return urls;
+}
+
+// OCR an image with Cloud Vision (REST, using the function's own service account). Returns
+// "" on any failure so callers fall back to manual entry.
+async function detectImageText(content) {
+  try {
+    const { access_token: token } = await admin.credential.applicationDefault().getAccessToken();
+    const res = await fetch("https://vision.googleapis.com/v1/images:annotate", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ requests: [{ image: { content: content.toString("base64") }, features: [{ type: "TEXT_DETECTION" }] }] })
+    });
+    const data = await res.json();
+    if (!res.ok) { logger.warn(`Vision OCR failed: ${res.status} ${data?.error?.message || ""}`); return ""; }
+    return data.responses?.[0]?.fullTextAnnotation?.text || "";
+  } catch (error) {
+    logger.warn(`Vision OCR error: ${error.message}`);
+    return "";
+  }
 }
 
 async function writeAudit(action, entity, detail, actor) {
@@ -1024,14 +1062,17 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     const floor = String(payload.floor || "").trim();
     const name = String(payload.name || "").trim();
     const paymentMode = String(payload.paymentMode || "").trim();
-    const reference = String(payload.reference || "").trim();
+    const reference = String(payload.reference || "").replace(/\s+/g, "");
     const amount = Number(payload.amount || 0);
+    const contributorType = String(payload.contributorType || "Owner");
+    const receiptUrls = cleanReceiptUrls(payload.receiptUrls);
 
     const eventSnap = await db.collection("events").doc(eventId).get();
     if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
     const eventData = eventSnap.data();
 
     if (!eventId || !flat || !floor || !name) throw new HttpsError("invalid-argument", "Select a floor and flat before saving this contribution.");
+    if (!["Owner", "Tenant"].includes(contributorType)) throw new HttpsError("invalid-argument", "Choose whether the owner or the tenant paid.");
     // Amount is now free-form (variable) — the SPOC enters what was collected.
     if (!Number.isFinite(amount) || amount <= 0) throw new HttpsError("invalid-argument", "Enter a valid contribution amount.");
     if (!["UPI", "Cash", "Bank Transfer"].includes(paymentMode)) throw new HttpsError("invalid-argument", "Choose a valid payment mode.");
@@ -1041,9 +1082,11 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     // Access: floor SPOC (own floor) or admin/committee (any floor). Multiple
     // contributions per flat are allowed — no duplicate block.
     await assertCanManageContribution(caller, eventData, floor);
+    if (contributorType === "Tenant") await assertTenantOccupied(flat);
+    await assertUniqueReference(eventId, paymentMode, reference, null);
 
     const contributionRef = db.collection("events").doc(eventId).collection("contributions").doc();
-    await contributionRef.set({ id: contributionRef.id, eventId, floor, flat, name, amount, paymentMode, reference, status: "Received", date: normalizeContributionDate(payload.date), createdAt: FIELD_VALUE.serverTimestamp(), recordedBy: caller.email });
+    await contributionRef.set({ id: contributionRef.id, eventId, floor, flat, name, contributorType, amount, paymentMode, reference, receiptUrls, status: "Received", date: normalizeContributionDate(payload.date), createdAt: FIELD_VALUE.serverTimestamp(), recordedBy: caller.email });
     await writeAudit("Recorded contribution", "Contribution", `${flat} · ${String(eventData.name || eventId)} · ₹${Math.round(amount)}`, caller);
     return { id: contributionRef.id, amount };
   }
@@ -1068,11 +1111,18 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
       updates.amount = amt;
     }
     if (payload.name !== undefined) updates.name = String(payload.name || "").trim();
+    if (payload.contributorType !== undefined) {
+      if (!["Owner", "Tenant"].includes(payload.contributorType)) throw new HttpsError("invalid-argument", "Choose whether the owner or the tenant paid.");
+      if (payload.contributorType === "Tenant" && before.contributorType !== "Tenant") await assertTenantOccupied(before.flat);
+      updates.contributorType = payload.contributorType;
+    }
     if (payload.paymentMode !== undefined) {
       if (!["UPI", "Cash", "Bank Transfer"].includes(payload.paymentMode)) throw new HttpsError("invalid-argument", "Choose a valid payment mode.");
       updates.paymentMode = payload.paymentMode;
     }
-    if (payload.reference !== undefined) updates.reference = String(payload.reference || "").trim();
+    if (payload.reference !== undefined) updates.reference = String(payload.reference || "").replace(/\s+/g, "");
+    if (payload.receiptUrls !== undefined) updates.receiptUrls = cleanReceiptUrls(payload.receiptUrls);
+    if (updates.reference && updates.reference !== before.reference) await assertUniqueReference(eventId, updates.paymentMode || before.paymentMode, updates.reference, contributionId);
     if (payload.date !== undefined && String(payload.date).trim()) updates.date = normalizeContributionDate(payload.date);
     await ref.set(updates, { merge: true });
     await writeAudit("Edited contribution", "Contribution", `${before.flat} · ${String(eventData.name || eventId)} · ₹${Math.round(updates.amount ?? before.amount ?? 0)}`, caller);
@@ -1127,14 +1177,8 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     const figures = (isClosedEventData(eventData) && eventData.settlementFigures) ? eventData.settlementFigures : await eventFigures(eventId);
     if (Number(figures.balance || 0) >= 0) throw new HttpsError("failed-precondition", "Additional contributions can be recorded only while this event's available balance is negative.");
 
-    // Same access as normal contributions: admin (any floor) or the floor SPOC.
-    const isAdmin = ADMIN_ROLES.includes(caller.profile.role);
-    if (!isAdmin) {
-      const spocMatch = await callerSpocAssignment(caller, eventData);
-      if (!spocMatch) throw new HttpsError("permission-denied", "Only the floor SPOC or an administrator can record contributions for this event.");
-      const spocFloor = String(spocMatch.floor || "").trim();
-      if (spocFloor && floor && spocFloor !== floor) throw new HttpsError("permission-denied", `As the Floor ${spocFloor} SPOC you can record contributions only for your own floor.`);
-    }
+    // Same access as normal contributions: admin/committee (any floor) or the floor SPOC.
+    await assertCanManageContribution(caller, eventData, floor);
 
     const ref = db.collection("events").doc(eventId).collection("additionalContributions").doc();
     await ref.set({ id: ref.id, eventId, floor, flat, name, amount, paymentMode, reference, note, status: "Received", kind: "additional", date: new Date().toISOString(), createdAt: FIELD_VALUE.serverTimestamp(), recordedBy: caller.email });
@@ -1165,10 +1209,9 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     if (!event.exists) throw new HttpsError("not-found", "Event not found.");
     if (isClosedEventData(event.data())) throw new HttpsError("failed-precondition", "This event is settled and closed for new expenses.");
 
-    // Only the floor SPOC or an administrator may submit expenses.
-    const expenseIsAdmin = ADMIN_ROLES.includes(caller.profile.role);
-    if (!expenseIsAdmin) {
-      if (!(await callerSpocAssignment(caller, event.data()))) throw new HttpsError("permission-denied", "Only the floor SPOC or an administrator can submit expenses for this event.");
+    // Admins, committee members, or any SPOC of this event may submit expenses.
+    if (!DIRECTORY_EDITOR_ROLES.includes(caller.profile.role) && !(await callerSpocFloors(caller, event.data())).length) {
+      throw new HttpsError("permission-denied", "Only a floor SPOC, an administrator, or a committee member can submit expenses for this event.");
     }
 
     const expenseRef = db.collection("events").doc(eventId).collection("expenses").doc();
@@ -1215,17 +1258,31 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     return { ok: true };
   }
   if (action === "createEvent" || action === "updateEvent") {
-    ensureRole(caller.profile, ADMIN_ROLES);
+    ensureRole(caller.profile, DIRECTORY_EDITOR_ROLES);
     const eventId = String(payload.id || payload.eventId || "").trim();
     const name = String(payload.name || "").trim();
     if (!name) throw new HttpsError("invalid-argument", "Event name is required.");
     const status = String(payload.status || "Planning in progress");
+    if (!["Planning in progress", "Upcoming", "Active", "Completed"].includes(status)) throw new HttpsError("invalid-argument", "Choose a valid event status.");
+    if (eventId) {
+      const existing = await db.collection("events").doc(eventId).get();
+      if (existing.exists && isSettledEventData(existing.data())) throw new HttpsError("failed-precondition", "This event is settled; it can no longer be edited.");
+    }
     const contributionAmount = Math.max(1, Number(payload.contributionAmount || 500));
     const spocs = Array.isArray(payload.spocs) ? payload.spocs.filter((item) => item && item.floor && item.flat).map((item) => {
       const upiId = String(item.upiId || "").trim();
       if (upiId && !/^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z][a-zA-Z0-9.\-_]{1,64}$/.test(upiId)) throw new HttpsError("invalid-argument", `Enter a valid UPI ID for the Floor ${item.floor} SPOC, e.g. name@okaxis.`);
       return { floor: String(item.floor).trim(), flat: String(item.flat).trim(), ...(upiId ? { upiId } : {}) };
     }) : [];
+    // Up to two distinct SPOCs per floor.
+    const flatsByFloor = new Map();
+    spocs.forEach(({ floor, flat }) => {
+      const flats = flatsByFloor.get(floor) || [];
+      if (flats.includes(flat.toUpperCase())) throw new HttpsError("invalid-argument", `Flat ${flat} is chosen twice as SPOC for Floor ${floor}.`);
+      flats.push(flat.toUpperCase());
+      if (flats.length > 2) throw new HttpsError("invalid-argument", `Floor ${floor} can have at most two SPOCs.`);
+      flatsByFloor.set(floor, flats);
+    });
     if (/^active$/i.test(status)) {
       const residentFloors = new Set((await db.collection("residents").get()).docs.map((entry) => String(entry.data().floor || "Unassigned")));
       const spocFloors = new Set(spocs.map((entry) => String(entry.floor)));
@@ -1270,7 +1327,7 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     return { id: eventRef.id, isNew };
   }
   if (action === "activateEvent") {
-    ensureRole(caller.profile, ADMIN_ROLES);
+    ensureRole(caller.profile, DIRECTORY_EDITOR_ROLES);
     const eventId = String(payload.eventId || "");
     const eventRef = db.collection("events").doc(eventId);
     const event = await eventRef.get();
@@ -1292,7 +1349,7 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
     return { ok: true };
   }
   if (action === "completeEvent") {
-    ensureRole(caller.profile, ADMIN_ROLES);
+    ensureRole(caller.profile, DIRECTORY_EDITOR_ROLES);
     const eventId = String(payload.eventId || "");
     const eventRef = db.collection("events").doc(eventId);
     const event = await eventRef.get();
@@ -1651,6 +1708,29 @@ exports.adminConsole = onCall({ region: "asia-south1" }, async (request) => {
       occupancyBreakdown: occupancyCounts,
       eventList: eventsSnap.docs.map(d => ({ id: d.id, name: d.data().name || d.data().title, date: d.data().date || d.data().startDate, active: d.data().active }))
     };
+  }
+  if (action === "readPaymentReference") {
+    // Billed per image, so only the people who can record this event's payments may use it.
+    ensureActive(caller.profile);
+    const eventId = String(payload.eventId || "");
+    const eventSnap = eventId ? await db.collection("events").doc(eventId).get() : null;
+    if (!eventSnap?.exists) throw new HttpsError("not-found", "Event not found.");
+    if (!DIRECTORY_EDITOR_ROLES.includes(caller.profile.role) && !(await callerSpocFloors(caller, eventSnap.data())).length) throw new HttpsError("permission-denied", "Only this event's SPOCs, committee, or administrators can read payment screenshots.");
+    const bucket = admin.storage().bucket();
+    const match = String(payload.url || "").match(/^https:\/\/firebasestorage\.googleapis\.com\/v0\/b\/([^/]+)\/o\/([^?]+)/);
+    let path = "";
+    try { path = match ? decodeURIComponent(match[2]) : ""; } catch (e) { /* malformed URL */ }
+    if (!match || match[1] !== bucket.name || !path.startsWith(`event-receipts/${eventId}/`)) throw new HttpsError("invalid-argument", "Upload the payment screenshot first.");
+    try {
+      const file = bucket.file(path);
+      const [metadata] = await file.getMetadata();
+      if (!String(metadata.contentType || "").startsWith("image/")) return { reference: "" }; // PDFs etc.: enter manually
+      const [content] = await file.download();
+      return { reference: extractUpiReference(await detectImageText(content)) };
+    } catch (error) {
+      logger.warn(`readPaymentReference: ${error.message}`);
+      return { reference: "" };
+    }
   }
   if (action === "importSpreadsheet") {
     ensureRole(caller.profile, ADMIN_ROLES);
